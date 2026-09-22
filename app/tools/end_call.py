@@ -1,17 +1,11 @@
-from twilio.rest import Client
-import os
+from app.twilio.twilio_client import twilio_client
 
 
 async def end_call(call_sid: str):
 
     try:
 
-        client = Client(
-            os.getenv("TWILIO_ACCOUNT_SID"),
-            os.getenv("TWILIO_AUTH_TOKEN"),
-        )
-
-        call = client.calls(call_sid).update(
+        call = twilio_client.calls(call_sid).update(
             status="completed"
         )
 
