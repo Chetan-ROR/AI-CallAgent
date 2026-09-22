@@ -1,4 +1,5 @@
 venv/
+.venv/
 bin/
 .env
 __pycache__/
