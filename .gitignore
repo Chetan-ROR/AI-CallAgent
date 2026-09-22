@@ -1,4 +1,6 @@
 venv/
+bin/
 .env
 __pycache__/
 *.pyc
+*.db

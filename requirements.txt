@@ -5,3 +5,5 @@ twilio
 websockets
 python-dotenv
 pydantic
+sqlalchemy
+python-multipart
