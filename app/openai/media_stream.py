@@ -1,5 +1,4 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from app.core.prompts import F45_SYSTEM_PROMPT
 from app.tools.end_call import end_call
 
 import asyncio
@@ -8,6 +7,8 @@ import json
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
+
+from app.core.realtime import REALTIME_MODEL, build_realtime_session
 
 load_dotenv()
 
@@ -162,7 +163,7 @@ async def media_stream(ws: WebSocket):
     }
 
     async with client.realtime.connect(
-        model="gpt-realtime-2"
+        model=REALTIME_MODEL
     ) as openai:
 
         print("✅ OpenAI Connected")
@@ -171,58 +172,7 @@ async def media_stream(ws: WebSocket):
         # OpenAI Session Configuration
         # ----------------------------------------
         await openai.session.update(
-            session={
-                "type": "realtime",
-
-                "instructions": F45_SYSTEM_PROMPT,
-
-                # ----------------------------------------
-                # Tools
-                # ----------------------------------------
-                "tools": [
-                    {
-                        "type": "function",
-                        "name": "end_call",
-                        "description": (
-                            "End the current phone call when the customer clearly "
-                            "says they are busy, asks to be called another time, "
-                            "or clearly wants to end the conversation."
-                        ),
-                        "parameters": {
-                            "type": "object",
-                            "properties": {},
-                            "required": []
-                        }
-                    }
-                ],
-
-                "tool_choice": "auto",
-
-                # ----------------------------------------
-                # Audio
-                # ----------------------------------------
-                "output_modalities": ["audio"],
-
-                "audio": {
-                    "input": {
-                        "format": {
-                            "type": "audio/pcmu"
-                        },
-
-                        "turn_detection": {
-                            "type": "server_vad",
-                            "create_response": True,
-                            "interrupt_response": True
-                        }
-                    },
-
-                    "output": {
-                        "format": {
-                            "type": "audio/pcmu"
-                        }
-                    }
-                }
-            }
+            session=build_realtime_session("phone")
         )
 
         print("✅ OpenAI Session Ready")
