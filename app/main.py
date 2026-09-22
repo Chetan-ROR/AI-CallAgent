@@ -18,6 +18,8 @@ from app.core.public_webhook import (
     trust_public_url_despite_self_probe_fail,
 )
 from app.openai.media_stream import router as media_router, warmup_openai_realtime
+from app.api.prompt import router as prompt_router
+from app.api.practice import router as practice_router
 
 
 async def _log_public_webhook_status():
@@ -137,7 +139,7 @@ app.add_middleware(
 
 @app.get("/")
 def home():
-    return {"message": "Gym AI POC Running"}
+    return {"message": "Gym AI POC Running", "status": "ok"}
 
 
 @app.get("/test-openai")
@@ -155,6 +157,8 @@ def test_openai():
 
 app.include_router(voice_router)
 app.include_router(media_router)
+app.include_router(prompt_router)
+app.include_router(practice_router)
 
 
 @app.get("/health")

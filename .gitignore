@@ -1,6 +1,11 @@
 venv/
+.venv/
 bin/
 .env
 __pycache__/
 *.pyc
 *.db
+frontend/node_modules/
+frontend/.next/
+frontend/.env.local
+frontend/.env*.local
