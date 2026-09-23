@@ -1,0 +1,20 @@
+(eval):7: command not found: setsid
+INFO:     Will watch for changes in these directories: ['/Users/admin/Downloads/project/AI-CallAgent']
+INFO:     Uvicorn running on http://0.0.0.0:8004 (Press CTRL+C to quit)
+INFO:     Started reloader process [75146] using WatchFiles
+/Users/admin/Downloads/project/AI-CallAgent/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+INFO:     Started server process [75252]
+INFO:     Waiting for application startup.
+⏳ Gym AI starting — OpenAI Realtime + public tunnels…
+🔌 Opening OpenAI Realtime...
+🔌 Starting cloudflared quick tunnel for Media Stream WSS…
+✅ OpenAI Realtime ready (1.5s)
+✅ OpenAI Realtime warmup ready for the next call
+✅ cloudflared WSS base (Twilio Media Stream): https://bob-zshops-secret-encryption.trycloudflare.com
+🌤️ Twilio HTTP callbacks (status/webhooks): http://127.0.0.1:8004
+🎧 Twilio Media Stream WSS: https://bob-zshops-secret-encryption.trycloudflare.com
+✅ Gym AI ready — accept calls from UI (use http://127.0.0.1:8000/make-call locally)
+INFO:     Application startup complete.
+INFO:     127.0.0.1:53996 - "GET /json/version HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:53995 - "GET / HTTP/1.1" 200 OK

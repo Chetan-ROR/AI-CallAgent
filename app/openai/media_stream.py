@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.core.config import LLC_CALL_AGENT_KEY, LLC_CLIENT_ID
 from app.core.prompt_builder import (

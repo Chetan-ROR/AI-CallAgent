@@ -15,7 +15,7 @@ from typing import IO
 _TUNNEL_URL: str | None = None
 _TUNNEL_PROC: subprocess.Popen | None = None
 _TUNNEL_TASK: asyncio.Task[str | None] | None = None
-_URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com", re.I)
+_URL_RE = re.compile(r"https://(?!api\.)[a-z0-9-]+\.trycloudflare\.com", re.I)
 _DOWNLOAD_LOCK = asyncio.Lock()
 
 
@@ -46,7 +46,10 @@ def media_stream_wss_base() -> str | None:
 
 
 def _cloudflared_download_name() -> str | None:
+    system = platform.system().lower()
     machine = platform.machine().lower()
+    if system == "darwin":
+        return None
     if machine in ("x86_64", "amd64"):
         return "cloudflared-linux-amd64"
     if machine in ("aarch64", "arm64"):
@@ -113,11 +116,15 @@ def _read_tunnel_url_from_output(stream: IO[str], timeout_sec: float) -> str | N
     return None
 
 
-async def _start_cloudflared_tunnel_once(*, port: int = 8000, timeout_sec: float = 50.0) -> str | None:
+async def _start_cloudflared_tunnel_once(*, port: int | None = None, timeout_sec: float = 50.0) -> str | None:
     global _TUNNEL_URL, _TUNNEL_PROC
 
     if _TUNNEL_URL:
         return _TUNNEL_URL
+
+    from app.core.config import APP_PORT
+
+    port = port or APP_PORT
 
     binary = await ensure_cloudflared_binary()
     if not binary:
@@ -149,7 +156,7 @@ async def _start_cloudflared_tunnel_once(*, port: int = 8000, timeout_sec: float
     return None
 
 
-async def ensure_cloudflared_tunnel(*, port: int = 8000, timeout_sec: float = 50.0) -> str | None:
+async def ensure_cloudflared_tunnel(*, port: int | None = None, timeout_sec: float = 50.0) -> str | None:
     """
     Start `cloudflared tunnel --url http://127.0.0.1:PORT` once and return https base URL.
     Concurrent callers share one startup task (single stdout reader).
@@ -158,6 +165,10 @@ async def ensure_cloudflared_tunnel(*, port: int = 8000, timeout_sec: float = 50
 
     if _TUNNEL_URL:
         return _TUNNEL_URL
+
+    from app.core.config import APP_PORT
+
+    port = port or APP_PORT
 
     if _TUNNEL_TASK is None or _TUNNEL_TASK.done():
         _TUNNEL_TASK = asyncio.create_task(

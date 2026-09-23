@@ -3,8 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
-from openai import OpenAI
-from openai import APIError
+from openai import APIError, OpenAI
 from pydantic import BaseModel
 
 from app.core.config import OPENAI_API_KEY

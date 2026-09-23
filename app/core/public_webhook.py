@@ -131,6 +131,11 @@ def is_dev_tunnel_url(http_base: str) -> bool:
     return "devtunnels.ms" in host
 
 
+def is_local_public_base(http_base: str) -> bool:
+    host = (urlparse((http_base or "").strip()).hostname or "").lower()
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
 def trust_public_url_despite_self_probe_fail(configured: str, base: str, probe: dict) -> bool:
     """
     Dev tunnels (e.g. devtunnels.ms) often time out when the app curls its own public URL,
@@ -209,7 +214,7 @@ async def resolve_media_stream_wss_url(http_base: str) -> tuple[str | None, str 
     Returns (wss_url, https_base_for_wss, error_message).
     """
     from app.core.cloudflared_tunnel import ensure_cloudflared_tunnel
-    from app.core.config import AUTO_CLOUDFLARED_FOR_WSS, STREAM_PUBLIC_BASE_URL
+    from app.core.config import APP_PORT, AUTO_CLOUDFLARED_FOR_WSS, STREAM_PUBLIC_BASE_URL
 
     if STREAM_PUBLIC_BASE_URL:
         return (
@@ -222,7 +227,8 @@ async def resolve_media_stream_wss_url(http_base: str) -> tuple[str | None, str 
     if not base:
         base = (PUBLIC_BASE_URL or "").rstrip("/")
 
-    if not is_dev_tunnel_url(base):
+    needs_public_wss = is_dev_tunnel_url(base) or is_local_public_base(base)
+    if not needs_public_wss:
         return http_to_ws_media_url(base), None, None
 
     if not AUTO_CLOUDFLARED_FOR_WSS:
@@ -236,14 +242,13 @@ async def resolve_media_stream_wss_url(http_base: str) -> tuple[str | None, str 
 
     from app.core.cloudflared_tunnel import media_stream_wss_base
 
-    cf = media_stream_wss_base() or await ensure_cloudflared_tunnel()
+    cf = media_stream_wss_base() or await ensure_cloudflared_tunnel(port=APP_PORT)
     if cf:
         return http_to_ws_media_url(cf), cf, None
 
     err = (
-        "Dev tunnel (devtunnels.ms) cannot carry Twilio Media Stream WebSocket (31901). "
-        "Restart the server after cloudflared downloads, run ngrok on port 8000, "
-        "or set STREAM_PUBLIC_BASE_URL in gym-ai-poc/.env to an https URL with working WSS."
+        "Twilio cannot use localhost or a Microsoft dev tunnel for Media Stream WSS. "
+        "Wait for cloudflared to start, or set STREAM_PUBLIC_BASE_URL to an https URL."
     )
     print("❌", err)
     return None, None, err
@@ -254,7 +259,19 @@ async def resolve_twilio_stream_base(configured: str) -> tuple[str | None, dict 
     Resolve PUBLIC_BASE_URL for outbound calls (HTTP reachability required).
     WSS probe is advisory unless STRICT_WSS_PROBE=1 in .env.
     """
-    from app.core.config import STRICT_WSS_PROBE
+    from app.core.cloudflared_tunnel import ensure_cloudflared_tunnel, media_stream_wss_base
+    from app.core.config import APP_PORT, AUTO_CLOUDFLARED_FOR_WSS, STRICT_WSS_PROBE
+
+    if is_local_public_base(configured) and AUTO_CLOUDFLARED_FOR_WSS:
+        cf = media_stream_wss_base() or await ensure_cloudflared_tunnel(port=APP_PORT)
+        if cf:
+            print("🌤️ Local PUBLIC_BASE_URL — Twilio will use cloudflared:", cf)
+            return cf, None
+        return None, {
+            "ok": False,
+            "error": "localhost is not reachable by Twilio and cloudflared did not start",
+            "url": configured,
+        }
 
     base, err = await asyncio.to_thread(resolve_reachable_public_base, configured)
     if not base:

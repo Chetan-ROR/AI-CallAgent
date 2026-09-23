@@ -1,7 +1,8 @@
+from pathlib import Path
 from dotenv import load_dotenv
 import os
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=True)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
@@ -24,6 +25,7 @@ AUTO_CLOUDFLARED_FOR_WSS = os.getenv("AUTO_CLOUDFLARED_FOR_WSS", "1").lower() in
 # If true, block make-call when local WSS probe to /media-stream fails (often false-negative on dev tunnels).
 STRICT_WSS_PROBE = os.getenv("STRICT_WSS_PROBE", "").lower() in ("1", "true", "yes")
 TEST_CALL_PHONE = os.getenv("TEST_CALL_PHONE", "+918458916116")
+APP_PORT = int(os.getenv("APP_PORT", "8004"))
 
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY not found in .env")

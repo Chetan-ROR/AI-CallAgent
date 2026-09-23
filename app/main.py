@@ -8,9 +8,10 @@ from fastapi.responses import JSONResponse
 from app.openai.client import client
 from app.twilio.voice import router as voice_router
 from app.core.cloudflared_tunnel import ensure_cloudflared_tunnel, shutdown_cloudflared_tunnel
-from app.core.config import AUTO_CLOUDFLARED_FOR_WSS, PUBLIC_BASE_URL, STREAM_PUBLIC_BASE_URL
+from app.core.config import APP_PORT, AUTO_CLOUDFLARED_FOR_WSS, PUBLIC_BASE_URL, STREAM_PUBLIC_BASE_URL
 from app.core.public_webhook import (
     is_dev_tunnel_url,
+    is_local_public_base,
     mark_public_webhook_ok,
     probe_public_health,
     probe_public_media_wss,
@@ -62,17 +63,19 @@ async def _log_public_webhook_status():
 
 def _needs_auto_cloudflared_wss() -> bool:
     return bool(
-        PUBLIC_BASE_URL
-        and is_dev_tunnel_url(PUBLIC_BASE_URL)
-        and AUTO_CLOUDFLARED_FOR_WSS
+        AUTO_CLOUDFLARED_FOR_WSS
         and not STREAM_PUBLIC_BASE_URL
+        and PUBLIC_BASE_URL
+        and (is_dev_tunnel_url(PUBLIC_BASE_URL) or is_local_public_base(PUBLIC_BASE_URL))
     )
 
 
 async def _startup_warmup():
     """Block until OpenAI + Twilio WSS tunnel are ready (no requests until this finishes)."""
     print("⏳ Gym AI starting — OpenAI Realtime + public tunnels…", flush=True)
-    wss_warm = ensure_cloudflared_tunnel() if _needs_auto_cloudflared_wss() else None
+    wss_warm = (
+        ensure_cloudflared_tunnel(port=APP_PORT) if _needs_auto_cloudflared_wss() else None
+    )
     await asyncio.gather(
         warmup_openai_realtime(),
         wss_warm if wss_warm is not None else asyncio.sleep(0),

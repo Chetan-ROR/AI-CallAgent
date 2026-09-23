@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from fastapi import APIRouter, Body, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel

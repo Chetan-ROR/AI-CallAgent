@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from app.core.prompts import F45_SYSTEM_PROMPT
 
 CALL_MECHANICS = """
@@ -340,6 +342,48 @@ If a class has no schedule row, say times are not listed in the system and offer
 """
 
 
+def _pricing_options_block(studio: dict) -> str:
+    options = studio.get("pricing_options") or []
+    if not options:
+        return ""
+    lines: list[str] = []
+    for opt in options[:60]:
+        if not isinstance(opt, dict):
+            continue
+        name = (opt.get("name") or "").strip()
+        if not name:
+            continue
+        parts = [name]
+        if opt.get("unlimited"):
+            parts.append("unlimited visits")
+        elif opt.get("sessions"):
+            parts.append(f"{opt['sessions']} session(s)")
+        exp_bits = []
+        if opt.get("expiration_length") not in (None, "", 0):
+            exp_bits.append(str(opt.get("expiration_length")))
+        if opt.get("expiration_unit"):
+            exp_bits.append(str(opt.get("expiration_unit")))
+        if exp_bits:
+            parts.append("expires " + " ".join(exp_bits))
+        if opt.get("program_name"):
+            parts.append(str(opt.get("program_name")))
+        price = opt.get("display_price") or opt.get("online_price") or opt.get("price")
+        if price not in (None, "", 0, "0"):
+            parts.append(f"Price {price}")
+        lines.append("- " + " · ".join(str(part) for part in parts if part))
+    body = "\n".join(lines) if lines else "- none listed"
+    return f"""
+# PRICING OPTIONS (CRM — same list as studio Pricing Option table; HIGHEST PRIORITY FOR PLANS)
+
+When they ask about memberships, plans, packs, drop-in, class cards, bootcamps, or prices, answer ONLY from this list.
+Use these exact product names. Do not invent Corporate Member, Monthly Member, PIF Member, $60 off, or any name that is not below.
+If they ask about non-member drop-in and it is on this list, say yes and use this row. Do not say you do not have it.
+If Price is listed you may say it. If Price is missing, say the front desk can confirm the current price. Never invent a dollar amount.
+
+{body}
+"""
+
+
 def _plans_block(studio: dict) -> str:
     plans = studio.get("membership_plans") or []
     lines = []
@@ -363,21 +407,30 @@ def _plans_block(studio: dict) -> str:
 
 
 def _offerings_block(studio: dict) -> str:
+    pricing = _pricing_options_block(studio)
+    if pricing:
+        plans_section = pricing
+        extra = (
+            "These pricing option names are the real products. "
+            "Do not substitute made-up plan names from older scripts."
+        )
+    else:
+        plans_section = f"Membership plans:\n{_plans_block(studio)}"
+        extra = (
+            "If a plan has Price listed, you may say that price. "
+            "If a plan has no price, do not invent a number."
+        )
     return f"""
 # WHAT THIS STUDIO OFFERS (from CRM)
 
 Class types: {_class_line(studio)}
 
-Membership plans:
-{_plans_block(studio)}
+{plans_section.strip()}
 
 This is what you can tell a new customer we offer.
-When they ask what you have, or after they have two minutes, mention 2-4 class names and the membership plan names.
+When they ask what you have, mention a few class names and 2-4 pricing options from the list above.
 Do not read the whole list in one breath.
-If a plan has Price listed, you may say that price. If a plan has no price, do not invent a number.
-Do not say Monthly includes 1000 visits.
-PIF is paid in full; if CRM lists a visit pack, you may say that number of class visits.
-Corporate is a company plan.
+{extra}
 {_class_schedule_block(studio)}
 """
 
