@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.core.realtime import agent_language_instructions
 from app.core.prompts import F45_SYSTEM_PROMPT
 
 CALL_MECHANICS = """
@@ -20,6 +21,13 @@ DEFAULT_FIRST_MESSAGE = (
 
 def _agent(agent) -> dict:
     return agent if isinstance(agent, dict) else {}
+
+
+def _attach_language_policy(text: str, agent=None) -> str:
+    block = agent_language_instructions(agent).strip()
+    if block and block not in (text or ""):
+        return f"{(text or '').rstrip()}\n\n{block}\n"
+    return text or ""
 
 
 def use_agent_prompt_only(agent=None) -> bool:
@@ -93,7 +101,7 @@ def _agent_phase_instructions(
         )
     if phase:
         parts.append(f"# CURRENT CALL PHASE\n{phase}")
-    return "\n\n".join(parts)
+    return _attach_language_policy("\n\n".join(parts), agent)
 
 
 def greeting_instructions(agent=None, member: dict | None = None, studio: dict | None = None) -> str:
@@ -495,11 +503,15 @@ def build_instructions(member: dict | None = None, studio: dict | None = None, a
     studio_location = _value(studio, "location", default="6322 Clayton Avenue, 63139")
 
     if use_agent_prompt_only(agent):
-        return prompt + _agent_crm_context(
-            member,
-            studio,
-            studio_name=studio_name,
-            studio_location=studio_location,
+        return _attach_language_policy(
+            prompt
+            + _agent_crm_context(
+                member,
+                studio,
+                studio_name=studio_name,
+                studio_location=studio_location,
+            ),
+            agent,
         )
 
     if is_known_member(member):
@@ -559,4 +571,4 @@ Do not invent a booking or say they are locked in for a visit unless staff confi
 {_offerings_block(studio)}
 """
 
-    return prompt + history
+    return _attach_language_policy(prompt + history, agent)

@@ -28,7 +28,11 @@ from app.core.public_webhook import (
 )
 from app.twilio.twilio_client import twilio_client as client
 from app.llc.client import LlcClient, save_agent_prefetch, save_crm_prefetch
-from app.openai.media_stream import ensure_openai_ready, prepare_openai_connection
+from app.openai.media_stream import (
+    ensure_openai_ready,
+    prepare_openai_connection,
+    recycle_openai_pool_after_outbound_dial,
+)
 from app.twilio.call_tracking import note_call_status
 
 load_dotenv()
@@ -420,7 +424,18 @@ async def _place_outbound_call(
             if studio_id:
                 client_id = studio_id
             save_agent_prefetch(client_id, agent_id, agent_lookup)
-            print("🤖 Agent loaded before dial:", agent.get("name"), agent_id)
+            voice = (agent.get("voice_settings") or {}).get("voice")
+            tools = agent.get("tools") or {}
+            enabled_tools = [name for name, on in tools.items() if on]
+            print(
+                "🤖 Agent loaded before dial:",
+                agent.get("name"),
+                agent_id,
+                "voice=",
+                voice or "default",
+                "tools=",
+                enabled_tools or "defaults",
+            )
         else:
             print(
                 "⚠️ No LLC agent loaded:",
@@ -519,6 +534,12 @@ async def _place_outbound_call(
 
     _record_dial(phone, call.sid)
     print(call.sid)
+    await recycle_openai_pool_after_outbound_dial()
+    print(
+        "📡 If the call is silent, confirm Twilio can reach:",
+        stream_url,
+        "(cloudflared must stay running; trycloudflare URL changes on restart)",
+    )
 
     return {
         "status": "Calling...",

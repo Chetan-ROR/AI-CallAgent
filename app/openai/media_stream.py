@@ -13,7 +13,11 @@ from app.core.prompt_builder import (
     waiting_instructions,
 )
 from app.llc.client import LlcClient, get_agent_prefetch, get_crm_prefetch
-from app.tools.definitions import OPENAI_TOOLS
+from app.core.realtime import (
+    resolve_agent_tools,
+    resolve_agent_voice,
+    turn_detection_for_agent,
+)
 from app.tools.dispatcher import dispatch_tool, parse_tool_arguments
 from app.tools.end_call import end_call
 from app.twilio.call_tracking import mark_media_stream_started
@@ -36,8 +40,8 @@ client = AsyncOpenAI(
 REALTIME_WS_OPTIONS = {
     "open_timeout": 45,
     "family": socket.AF_INET,
-    "ping_interval": 10,
-    "ping_timeout": 20,
+    "ping_interval": 15,
+    "ping_timeout": 45,
 }
 
 QUIET_EVENTS = {
@@ -65,41 +69,9 @@ def _clean(value):
     return value
 
 
-def _truthy(value) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value in (None, "", 0, "0", "false", "False"):
-        return False
-    return True
-
-
 def _agent_tools(stream_info: dict | None, *, tools_enabled: bool):
-    if not tools_enabled:
-        return []
     agent = (stream_info or {}).get("agent") or {}
-    enabled = agent.get("tools")
-    if not isinstance(enabled, dict) or not enabled:
-        return OPENAI_TOOLS
-    selected = [
-        tool
-        for tool in OPENAI_TOOLS
-        if _truthy(enabled.get(tool.get("name")))
-    ]
-    return selected or OPENAI_TOOLS
-
-
-VALID_VOICES = {
-    "alloy",
-    "ash",
-    "ballad",
-    "coral",
-    "echo",
-    "sage",
-    "shimmer",
-    "verse",
-    "marin",
-    "cedar",
-}
+    return resolve_agent_tools(agent, tools_enabled=tools_enabled)
 
 
 def _session_config(
@@ -110,18 +82,26 @@ def _session_config(
     tools_enabled: bool = True,
     stream_info: dict | None = None,
 ):
-    voice = (((stream_info or {}).get("agent") or {}).get("voice_settings") or {})
-    voice_name = str(voice.get("voice") or "alloy").strip().lower()
-    if voice_name not in VALID_VOICES:
-        voice_name = "alloy"
-    if voice.get("allow_interrupt") is False:
-        allow_interrupt = False
+    agent = (stream_info or {}).get("agent") or {}
+    voice_name = resolve_agent_voice(agent, fallback="alloy")
+    turn_detection = turn_detection_for_agent(
+        agent,
+        create_response=create_response,
+    )
+    if not agent and not allow_interrupt:
+        turn_detection["interrupt_response"] = False
+        turn_detection["threshold"] = 0.9
+    elif not agent:
+        turn_detection["interrupt_response"] = allow_interrupt
+        turn_detection["threshold"] = 0.65 if allow_interrupt else 0.9
+
+    tools = _agent_tools(stream_info, tools_enabled=tools_enabled)
 
     return {
         "type": "realtime",
         "instructions": instructions,
-        "tools": _agent_tools(stream_info, tools_enabled=tools_enabled),
-        "tool_choice": "auto" if tools_enabled else "none",
+        "tools": tools,
+        "tool_choice": "auto" if tools_enabled and tools else "none",
         "output_modalities": ["audio"],
         # Realtime audio turns need headroom; 380 caused empty incomplete responses after barge-in.
         "max_output_tokens": 1024 if not tools_enabled else 1200,
@@ -130,13 +110,7 @@ def _session_config(
                 "format": {
                     "type": "audio/pcmu"
                 },
-                "turn_detection": {
-                    "type": "server_vad",
-                    "create_response": create_response,
-                    "interrupt_response": allow_interrupt,
-                    "threshold": 0.65 if allow_interrupt else 0.9,
-                    "silence_duration_ms": 900,
-                }
+                "turn_detection": turn_detection,
             },
             "output": {
                 "format": {
@@ -821,16 +795,39 @@ def prepare_openai_connection():
         pass
 
 
+async def recycle_openai_pool_after_outbound_dial():
+    """
+    Drop the pre-dial warmup socket so a fresh Realtime session opens while the phone rings.
+    The old pooled connection often hits keepalive ping timeout before the callee answers.
+    """
+    global _pool_session
+    stale = None
+    async with _pool_lock:
+        if _pool_session:
+            stale = _pool_session
+            _pool_session = None
+    if stale:
+        asyncio.create_task(stale.close())
+    prepare_openai_connection()
+    print("🔁 OpenAI pool recycled for incoming media stream (fresh session warming)")
+
+
 async def take_openai_session():
     global _pool_session
-    live = await ensure_openai_ready()
-    async with _pool_lock:
-        if _pool_session is live:
+    last_err = None
+    for attempt in range(1, 3):
+        live = await ensure_openai_ready()
+        async with _pool_lock:
+            if _pool_session is live:
+                _pool_session = None
+        if live.alive:
+            prepare_openai_connection()
+            return live
+        last_err = "OpenAI realtime connection closed before the call"
+        print(f"⚠️ Stale OpenAI session (attempt {attempt}/2) — reopening...")
+        async with _pool_lock:
             _pool_session = None
-    prepare_openai_connection()
-    if not live.alive:
-        raise TimeoutError("OpenAI realtime connection closed before the call")
-    return live
+    raise TimeoutError(last_err or "OpenAI realtime connection unavailable")
 
 
 async def warmup_openai_realtime():

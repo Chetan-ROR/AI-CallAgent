@@ -3,12 +3,19 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import Response
 from openai import APIError, OpenAI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.config import OPENAI_API_KEY
 from app.core.prompt_builder import agent_first_message, build_instructions
-from app.core.realtime import REALTIME_MODEL, build_realtime_session
+from app.core.realtime import (
+    REALTIME_MODEL,
+    REALTIME_VOICE_CATALOG,
+    VALID_VOICES,
+    VOICE_PREVIEW_INSTRUCTIONS,
+    build_realtime_session,
+)
 from app.llc.client import LlcClient
 
 router = APIRouter()
@@ -22,6 +29,72 @@ class PracticeSessionRequest(BaseModel):
     client_id: Optional[str] = None
     agent_id: Optional[str] = None
     member_id: Optional[str] = None
+
+
+VOICE_PREVIEW_TEXT = (
+    "Hello, thanks for calling. This is how I'll sound when I speak with your customers."
+)
+
+
+class VoicePreviewRequest(BaseModel):
+    voice: str = Field(..., min_length=1)
+    text: Optional[str] = None
+
+
+@router.get("/practice/voices")
+def list_realtime_voices():
+    """OpenAI Realtime built-in voices for agent configuration."""
+    return {"voices": list(REALTIME_VOICE_CATALOG)}
+
+
+def _speech_preview_bytes(*, voice: str, text: str) -> bytes:
+    """Preview via Speech API (approximates Realtime timbre; not identical to live calls)."""
+    instructions = VOICE_PREVIEW_INSTRUCTIONS.get(voice)
+    models = ("gpt-4o-mini-tts", "gpt-4o-mini-tts-2025-03-20")
+    last_error: Exception | None = None
+    for model in models:
+        try:
+            kwargs: dict = {
+                "model": model,
+                "voice": voice,
+                "input": text,
+                "response_format": "mp3",
+            }
+            if instructions:
+                kwargs["instructions"] = instructions
+            result = client.audio.speech.create(**kwargs)
+            return result.content
+        except APIError as exc:
+            last_error = exc
+            continue
+    if last_error:
+        raise last_error
+    raise RuntimeError("Could not generate voice preview")
+
+
+@router.post("/practice/voice-preview")
+def create_voice_preview(body: VoicePreviewRequest):
+    """Short MP3 sample for the Realtime voice picker (uses OpenAI Speech API)."""
+    voice = body.voice.strip().lower()
+    if voice not in VALID_VOICES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported voice. Choose one of: {', '.join(sorted(VALID_VOICES))}",
+        )
+    text = (body.text or "").strip() or VOICE_PREVIEW_TEXT
+    try:
+        audio = _speech_preview_bytes(voice=voice, text=text)
+    except APIError as exc:
+        raise HTTPException(
+            status_code=exc.status_code or 502,
+            detail=str(exc) or "Could not generate voice preview",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not generate voice preview: {exc}",
+        ) from exc
+    return Response(content=audio, media_type="audio/mpeg")
 
 
 async def _practice_llc_context(
@@ -61,6 +134,9 @@ async def create_practice_session(body: Optional[PracticeSessionRequest] = None)
     agent_id = (payload.agent_id or "").strip() or None
     member_id = (payload.member_id or "").strip() or None
 
+    member: dict = {}
+    studio: dict = {}
+    agent: dict = {}
     if client_id:
         member, studio, agent = await _practice_llc_context(
             client_id=client_id,
@@ -69,10 +145,8 @@ async def create_practice_session(body: Optional[PracticeSessionRequest] = None)
         )
         if agent or studio:
             instructions = build_instructions(member, studio, agent)
+        if agent:
             first_message = agent_first_message(agent) or first_message
-            voice_settings = agent.get("voice_settings") if isinstance(agent, dict) else None
-            if isinstance(voice_settings, dict) and voice_settings.get("voice"):
-                voice = voice_settings.get("voice") or voice
 
     try:
         secret = client.realtime.client_secrets.create(
@@ -82,6 +156,7 @@ async def create_practice_session(body: Optional[PracticeSessionRequest] = None)
                 instructions=instructions,
                 first_message=first_message,
                 voice=voice,
+                agent=agent or None,
             ),
         )
     except APIError as exc:
