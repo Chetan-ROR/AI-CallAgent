@@ -8,7 +8,7 @@ from app.core.openai_realtime_models import (
 )
 from app.core.prompt_store import get_prompt
 from app.core.compliance import allows_call_transcript
-from app.core.crm_tools import agent_tool_enabled
+from app.core.crm_tools import agent_tool_enabled, end_call_enabled
 from app.tools.definitions import OPENAI_TOOLS
 
 AGENT_LANGUAGES: dict[str, str] = {"en": "English", "hi": "Hindi"}
@@ -103,21 +103,6 @@ VALID_VOICES = frozenset(str(v["id"]) for v in REALTIME_VOICE_CATALOG)
 REALTIME_MODEL = DEFAULT_REALTIME_MODEL
 DEFAULT_VOICE = "marin"
 
-END_CALL_TOOL: dict[str, Any] = {
-    "type": "function",
-    "name": "end_call",
-    "description": (
-        "End the current conversation ONLY after the customer clearly says "
-        "goodbye, hang up, not interested, stop calling, or that they are busy. "
-        "Never call this because of silence, noise, or guessed speech."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {},
-        "required": [],
-    },
-}
-
 TURN_DETECTION: dict[str, Any] = {
     "type": "server_vad",
     "create_response": True,
@@ -144,17 +129,8 @@ Start with ONE short greeting, then STOP and wait for the customer.
 After every reply, STOP. Do not keep talking. Do not fill silence.
 Never invent what the customer said. If you are not sure they spoke, ask one short clarification and wait.
 Do not assume the customer spoke from background noise or your own voice echoing on their line.
-Only call end_call after the customer clearly says goodbye, hang up, not interested, or stop calling.
 Never mention that this is a practice session, a chatbot, or a browser unless the customer asks.
 """
-
-
-def _truthy(value) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value in (None, "", 0, "0", "false", "False"):
-        return False
-    return True
 
 
 def resolve_agent_language(agent: dict | None, *, default: str = "en") -> str:
@@ -232,11 +208,12 @@ def agent_allow_interrupt(agent: dict | None, *, default: bool = True) -> bool:
 def resolve_agent_tools(agent: dict | None, *, tools_enabled: bool = True) -> list[dict[str, Any]]:
     if not tools_enabled:
         return []
-    selected = [
-        tool
-        for tool in OPENAI_TOOLS
-        if agent_tool_enabled(agent, tool.get("name") or "", default=True)
-    ]
+    selected = []
+    for tool in OPENAI_TOOLS:
+        name = tool.get("name") or ""
+        enabled = end_call_enabled(agent) if name == "end_call" else agent_tool_enabled(agent, name, default=False)
+        if enabled:
+            selected.append(tool)
     return selected
 
 

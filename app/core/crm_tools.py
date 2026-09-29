@@ -60,13 +60,16 @@ def agent_tools_map(agent: dict | None) -> dict[str, Any]:
 
 def agent_tool_enabled(agent: dict | None, key: str, *, default: bool = False) -> bool:
     tools = agent_tools_map(agent)
-    if not tools:
-        if key == "end_call":
-            return True
-        return default
-    if key not in tools:
+    if not tools or key not in tools:
         return default
     return _truthy(tools.get(key))
+
+
+def end_call_enabled(agent: dict | None) -> bool:
+    """Saved agents honor the flag. Agents with no tools map keep end_call on."""
+    if not agent_tools_map(agent):
+        return True
+    return agent_tool_enabled(agent, "end_call", default=False)
 
 
 def agent_needs_crm_fetch(agent: dict | None) -> bool:

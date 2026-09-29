@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.core.compliance import recording_consent_message
-from app.core.crm_tools import agent_needs_crm_fetch, agent_tool_enabled
+from app.core.crm_tools import agent_needs_crm_fetch, agent_tool_enabled, end_call_enabled
 from app.core.realtime import agent_language_instructions
 from app.core.prompts import F45_SYSTEM_PROMPT
 
@@ -28,7 +28,10 @@ def _agent(agent) -> dict:
 def _attach_language_policy(text: str, agent=None) -> str:
     block = agent_language_instructions(agent).strip()
     if block and block not in (text or ""):
-        return f"{(text or '').rstrip()}\n\n{block}\n"
+        text = f"{(text or '').rstrip()}\n\n{block}\n"
+    policy = tool_source_policy(agent).strip()
+    if policy and policy not in (text or ""):
+        text = f"{(text or '').rstrip()}\n\n{policy}\n"
     return text or ""
 
 
@@ -54,8 +57,54 @@ def agent_first_message(agent=None) -> str:
     return DEFAULT_FIRST_MESSAGE
 
 
+def _member_if_enabled(agent, member: dict | None) -> dict:
+    """Caller name, contact, and visit history only when the member tool is on."""
+    if agent_tool_enabled(agent, "crm_member", default=False):
+        return member or {}
+    return {}
+
+
+def tool_source_policy(agent=None) -> str:
+    """Memberships, classes, the caller, and hang-up come only from enabled tools."""
+    member_on = agent_tool_enabled(agent, "crm_member", default=False)
+    classes_on = agent_tool_enabled(agent, "crm_class_schedule", default=False)
+    pricing_on = agent_tool_enabled(agent, "crm_pricing", default=False)
+    end_on = end_call_enabled(agent)
+
+    member_rule = (
+        "Member profile is ON. The caller's name, phone, email, visits, and their own membership status come only from the member section below. Do not invent a caller."
+        if member_on
+        else "Member profile is OFF. Do not use a caller name, phone, email, visit history, or their membership status. Ignore {{contact.*}} leftovers and any name in an older script."
+    )
+    class_rule = (
+        "Class schedule is ON. Class names, days, and times come only from the CLASS SCHEDULE section. Do not use class lists written in the agent script."
+        if classes_on
+        else "Class schedule is OFF. Do not name classes, days, or class times. If they ask, say you don't have the class schedule on this call."
+    )
+    pricing_rule = (
+        "Pricing & plans is ON. Membership plans, packs, and prices come only from the pricing section. Do not quote a plan or dollar amount from the agent script unless that same row is in the pricing section."
+        if pricing_on
+        else "Pricing & plans is OFF. Do not name membership plans, packs, discounts, or prices. If they ask, say you don't have plan details on this call."
+    )
+    end_rule = (
+        "End call is ON. Hang up only by calling the end_call tool, and only after a short goodbye."
+        if end_on
+        else "End call is OFF. Do not call end_call. Do not try to hang up the line."
+    )
+    return f"""
+# ENABLED TOOLS (highest priority for memberships, classes, the caller, and hang-up)
+
+{member_rule}
+{class_rule}
+{pricing_rule}
+{end_rule}
+If a section for that tool is missing, say you don't have it. Do not fill the gap from the script.
+"""
+
+
 def agent_spoken_opening(agent=None, member: dict | None = None, studio: dict | None = None) -> str:
     """Greeting the caller hears, including the recording-consent line when set."""
+    member = _member_if_enabled(agent, member)
     opening = apply_contact_tokens(agent_first_message(agent), member, studio).strip()
     consent = apply_contact_tokens(recording_consent_message(agent), member, studio).strip()
     if consent and opening:
@@ -100,6 +149,7 @@ def _agent_phase_instructions(
     phase: str = "",
 ) -> str:
     agent = _agent(agent)
+    member = _member_if_enabled(agent, member)
     base = apply_contact_tokens(agent_conversation_prompt(agent), member, studio)
     phase = (phase or "").strip()
     parts = [base]
@@ -109,7 +159,7 @@ def _agent_phase_instructions(
         parts.append(
             "# LIVE PHONE\n"
             "This is a live phone call. Short turns. Follow your agent instructions above.\n"
-            "Use CRM context below for classes, schedules, and plans — do not invent facts."
+            "Memberships, classes, and the caller come only from enabled tool sections below."
         )
     if phase:
         parts.append(f"# CURRENT CALL PHASE\n{phase}")
@@ -142,20 +192,6 @@ def member_display_first_name(member: dict | None) -> str:
     return ""
 
 
-def _plan_names_line(studio: dict) -> str:
-    names = []
-    for plan in studio.get("membership_plans") or []:
-        if isinstance(plan, dict):
-            name = (plan.get("name") or "").strip()
-        else:
-            name = str(plan).strip()
-        if name:
-            names.append(name)
-    if names:
-        return ", ".join(names[:4])
-    return "monthly, paid-in-full, and corporate memberships"
-
-
 def waiting_instructions(
     agent=None,
     studio: dict | None = None,
@@ -170,7 +206,7 @@ You are on a live phone call. You already gave your greeting (or opening line).
 
 The customer is responding now. Follow ONLY your agent instructions above for what to say next.
 Do NOT use any offer, discount, or script that is not written in your agent instructions.
-Use CRM class schedules and membership data below when they ask about classes or plans.
+Membership plans, class days, and the caller's profile come only from enabled tool sections.
 
 - If they cannot talk: one short sentence offering to call back, then stop.
 - If they ask to stop calling: one polite goodbye, then stop.
@@ -237,14 +273,14 @@ Do not repeat "Awesome thanks" or the profile line. Keep it brief and natural.
     return _agent_phase_instructions(agent, member, studio, phase)
 
 
+def _hangup_line(agent, when: str) -> str:
+    if end_call_enabled(agent):
+        return f"After {when}, call the end_call tool."
+    return f"After {when}, stop talking. Do not call end_call."
+
+
 def callback_instructions(agent=None) -> str:
-    tools = _agent(agent).get("tools") or {}
-    end_call = tools.get("end_call", True)
-    hangup = (
-        "After the goodbye line, you MUST call the end_call tool."
-        if end_call
-        else "After the goodbye line, stop talking."
-    )
+    hangup = _hangup_line(agent, "the goodbye line")
     phase = f"""
 You are on a live phone call. The customer is busy.
 You already asked when you can call them back.
@@ -296,16 +332,6 @@ def _membership_line(membership) -> str:
     return ", ".join(bits) if bits else "Unknown"
 
 
-def _class_line(studio: dict) -> str:
-    names = [str(item).strip() for item in (studio.get("class_names") or []) if str(item).strip()]
-    types = [str(item).strip() for item in (studio.get("class_types") or []) if str(item).strip()]
-    if names:
-        return ", ".join(names[:12])
-    if types:
-        return ", ".join(types[:12])
-    return "not listed in CRM"
-
-
 def _format_schedule_days(days) -> str:
     if not days:
         return ""
@@ -314,52 +340,62 @@ def _format_schedule_days(days) -> str:
     return str(days).strip()
 
 
+def _schedule_clock(value) -> str:
+    text = str(value or "").strip()
+    if "T" in text and len(text) >= 16:
+        # Dated occurrences repeat the same weekly slot. Keep the clock only.
+        clock = text[11:16]
+        hour, minute = clock.split(":")
+        hour_i = int(hour)
+        suffix = "AM" if hour_i < 12 else "PM"
+        hour_12 = hour_i % 12 or 12
+        return f"{hour_12}:{minute} {suffix}"
+    return text
+
+
 def _class_schedule_block(studio: dict) -> str:
-    catalog = studio.get("classes") or []
-    if not catalog:
-        return """
-# CLASS SCHEDULE (CRM)
-No per-class schedule rows were returned — only class names/types above.
-If they ask when a class runs, say you only see class names in the system and staff can confirm times.
-"""
+    catalog = [cls for cls in (studio.get("classes") or []) if isinstance(cls, dict)]
+    names_only = [str(item).strip() for item in (studio.get("class_names") or []) if str(item).strip()]
     lines: list[str] = []
-    for cls in catalog[:30]:
-        if not isinstance(cls, dict):
-            continue
+    if not catalog and not names_only:
+        lines.append("No class rows were returned from CRM.")
+    seen_names: set[str] = set()
+    for cls in catalog:
         name = (cls.get("name") or "Class").strip()
-        schedules = cls.get("schedules") or []
+        if not name:
+            continue
+        seen_names.add(name.lower())
+        schedules = [sch for sch in (cls.get("schedules") or []) if isinstance(sch, dict)]
         if not schedules:
             teacher = (cls.get("teacher") or "").strip()
-            hint = f" (instructor {teacher})" if teacher else ""
-            lines.append(f"- {name}: no recurring schedule in CRM{hint}")
+            hint = f" with {teacher}" if teacher else ""
+            lines.append(f"- {name}: days and times are not listed{hint}")
             continue
-        for sch in schedules[:8]:
-            if not isinstance(sch, dict):
-                continue
+        slots: list[str] = []
+        seen_slots: set[tuple[str, str, str]] = set()
+        for sch in schedules:
             days = _format_schedule_days(sch.get("days"))
-            time = (sch.get("time") or sch.get("start_time") or "").strip()
+            time = _schedule_clock(sch.get("time") or sch.get("start_time"))
             teacher = (sch.get("staff_name") or cls.get("teacher") or "").strip()
-            parts = [name]
-            if days:
-                parts.append(days)
-            if time:
-                parts.append(time)
+            key = (days.lower(), time.lower(), teacher.lower())
+            if key in seen_slots:
+                continue
+            seen_slots.add(key)
+            bit = " ".join(part for part in (days, time) if part).strip() or "time not listed"
             if teacher:
-                parts.append(f"with {teacher}")
-            loc = (sch.get("location_name") or cls.get("location") or "").strip()
-            if loc:
-                parts.append(f"at {loc}")
-            lines.append("- " + " · ".join(parts))
-    body = "\n".join(lines[:45]) if lines else "- (empty)"
-    return f"""
-# CLASS SCHEDULE (CRM — ground truth for this studio)
+                bit = f"{bit} ({teacher})"
+            slots.append(bit)
+            if len(slots) >= 6:
+                break
+        lines.append(f"- {name}: " + "; ".join(slots))
 
-When the caller asks what classes you offer, when they run, or what times are available, answer using ONLY this schedule.
-You may summarize (e.g. a few popular times) — do not invent days or times not listed here.
-If a class has no schedule row, say times are not listed in the system and offer to have the front desk confirm.
+    for name in names_only:
+        if name.lower() in seen_names:
+            continue
+        lines.append(f"- {name}: days and times are not listed")
 
-{body}
-"""
+    body = "\n".join(lines) if lines else "- (empty)"
+    return f"# CLASS SCHEDULE (CRM)\n\n{body}\n"
 
 
 def _pricing_options_block(studio: dict) -> str:
@@ -426,33 +462,11 @@ def _plans_block(studio: dict) -> str:
     return "\n".join(lines) if lines else "- not listed in CRM"
 
 
-def _offerings_block(studio: dict) -> str:
+def _membership_block(studio: dict) -> str:
     pricing = _pricing_options_block(studio)
     if pricing:
-        plans_section = pricing
-        extra = (
-            "These pricing option names are the real products. "
-            "Do not substitute made-up plan names from older scripts."
-        )
-    else:
-        plans_section = f"Membership plans:\n{_plans_block(studio)}"
-        extra = (
-            "If a plan has Price listed, you may say that price. "
-            "If a plan has no price, do not invent a number."
-        )
-    return f"""
-# WHAT THIS STUDIO OFFERS (from CRM)
-
-Class types: {_class_line(studio)}
-
-{plans_section.strip()}
-
-This is what you can tell a new customer we offer.
-When they ask what you have, mention a few class names and 2-4 pricing options from the list above.
-Do not read the whole list in one breath.
-{extra}
-{_class_schedule_block(studio)}
-"""
+        return pricing
+    return f"# MEMBERSHIPS AND PRICING\n\n{_plans_block(studio)}\n"
 
 
 def is_known_member(member: dict | None) -> bool:
@@ -500,46 +514,22 @@ Use their first name ({first_name or "from CRM"}) when appropriate.
 
     if agent_tool_enabled(agent, "crm_class_schedule", default=False):
         parts.append(_class_schedule_block(studio).strip())
-        parts.append(
-            "When they ask about class days or times, use the CLASS SCHEDULE section — do not guess."
-        )
 
     if agent_tool_enabled(agent, "crm_pricing", default=False):
-        parts.append(_offerings_block(studio).strip())
+        parts.append(_membership_block(studio).strip())
 
     return "\n\n".join(parts) + "\n"
 
 
-def _agent_crm_context(
-    member: dict,
-    studio: dict,
-    agent: dict | None,
-    *,
-    studio_name: str,
-    studio_location: str,
-) -> str:
-    return build_crm_prompt_addon(
-        agent,
-        member,
-        studio,
-        studio_name=studio_name,
-        studio_location=studio_location,
-    )
-
-
 def build_instructions(member: dict | None = None, studio: dict | None = None, agent: dict | None = None) -> str:
-    member = member or {}
     studio = studio or {}
     agent = _agent(agent)
+    member = _member_if_enabled(agent, member or {})
 
     if not is_known_member(member):
         first_name = ""
-        full_name = ""
     else:
         first_name = member_display_first_name(member) or _value(member, "first_name", default="")
-        full_name = _value(member, "full_name", "first_name", default="")
-    email = _value(member, "email")
-    phone = _value(member, "phone")
 
     prompt = apply_contact_tokens(agent_conversation_prompt(agent), member, studio)
 
@@ -556,6 +546,8 @@ def build_instructions(member: dict | None = None, studio: dict | None = None, a
         studio_location=studio_location,
     )
 
+    hangup = _hangup_line(agent, "the thank-you line")
+
     if use_agent_prompt_only(agent):
         return _attach_language_policy(prompt + crm_addon, agent)
 
@@ -564,11 +556,11 @@ def build_instructions(member: dict | None = None, studio: dict | None = None, a
 
 # CALL CONTEXT
 
-Use the customer's real first name ({first_name or "from CRM"}) when CRM member data is available in the prompt.
-After they answer the classes-or-memberships question, share CRM details briefly (only if present below), then ask about the free trainer consult.
+Use the customer's real first name ({first_name or "from CRM"}) from the member tool.
+Share class or membership details only when that tool's section is present below.
 Do not call send_sms. Do not promise a text.
-If they want the free consult: thank them by first name, say someone from Total Bizz gym will reach out to schedule it, say thanks for your time, then end_call — do not hang up the instant they say yes.
-Do not create a member. Do not book them into a class on this call unless your tools explicitly allow it.
+If they want the free consult: thank them by first name, say someone from Total Bizz gym will reach out to schedule it, say thanks for your time. {hangup}
+Do not create a member. Do not book them into a class on this call.
 """
     else:
         history = f"""
@@ -578,18 +570,18 @@ Do not create a member. Do not book them into a class on this call unless your t
 Studio: {studio_name}
 Studio location: {studio_location}
 
-This is a NEW / unknown number unless member CRM data appears below.
+This is a NEW / unknown number unless the member tool section appears below.
 Do not invent the customer's name, email, visit history, or membership status.
 After they agree to talk, you may pitch. Not before they have clearly said yes, sure, okay, or that they have a minute.
 
-Tell them what the studio offers using CRM sections below when present. Do not invent extra plans or prices.
+Tell them about memberships or classes only from the enabled tool sections below.
 
 OVERRIDE: Do not call send_sms. Do not use iMessage. Do not promise a text. Do not create a CRM member.
 If they are interested in the free trainer consult (yes, sure, book it, sign me up):
-1. Do NOT call end_call on the same turn they said yes.
+1. Do not hang up on the same turn they said yes.
 2. Do not save them in CRM and do not invent a booking time.
 3. NEW caller (no CRM member name): ask ONE question — "Great — what name should I put this under?" — then wait.
-4. After they give a name: say "Perfect, someone from Total Bizz gym will reach out to schedule your free trainer consult. Thanks for your time — have a good one." Then call end_call.
+4. After they give a name: say "Perfect, someone from Total Bizz gym will reach out to schedule your free trainer consult. Thanks for your time — have a good one." {hangup}
 5. Do not hang up before that thank-you line.
 Do not invent a booking or say they are locked in for a visit unless staff confirmed it.
 """
