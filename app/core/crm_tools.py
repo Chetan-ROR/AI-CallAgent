@@ -1,0 +1,73 @@
+from __future__ import annotations
+
+from typing import Any
+
+# Toggle keys stored on agent.tools in Rails (not all are OpenAI function calls).
+CRM_TOOL_KEYS: frozenset[str] = frozenset(
+    {
+        "crm_member",
+        "crm_class_schedule",
+        "crm_pricing",
+    }
+)
+
+OPENAI_FUNCTION_TOOL_KEYS: frozenset[str] = frozenset({"end_call"})
+
+AGENT_TOOL_CATALOG: tuple[dict[str, Any], ...] = (
+    {
+        "key": "end_call",
+        "kind": "realtime",
+        "label": "End call",
+        "description": "Let the agent hang up after a short goodbye.",
+        "default_enabled": True,
+    },
+    {
+        "key": "crm_member",
+        "kind": "crm",
+        "label": "Member profile",
+        "description": "Load member name, membership, and visit history from CRM into the prompt.",
+        "default_enabled": False,
+    },
+    {
+        "key": "crm_class_schedule",
+        "kind": "crm",
+        "label": "Class schedule",
+        "description": "Load studio class days and times from CRM into the prompt.",
+        "default_enabled": False,
+    },
+    {
+        "key": "crm_pricing",
+        "kind": "crm",
+        "label": "Pricing & plans",
+        "description": "Load membership plans and pricing options from CRM into the prompt.",
+        "default_enabled": False,
+    },
+)
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value in (None, "", 0, "0", "false", "False"):
+        return False
+    return True
+
+
+def agent_tools_map(agent: dict | None) -> dict[str, Any]:
+    raw = (agent or {}).get("tools")
+    return raw if isinstance(raw, dict) else {}
+
+
+def agent_tool_enabled(agent: dict | None, key: str, *, default: bool = False) -> bool:
+    tools = agent_tools_map(agent)
+    if not tools:
+        if key == "end_call":
+            return True
+        return default
+    if key not in tools:
+        return default
+    return _truthy(tools.get(key))
+
+
+def agent_needs_crm_fetch(agent: dict | None) -> bool:
+    return any(agent_tool_enabled(agent, key, default=False) for key in CRM_TOOL_KEYS)

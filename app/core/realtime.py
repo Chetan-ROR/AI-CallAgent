@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional
 
+from app.core.openai_realtime_models import (
+    DEFAULT_REALTIME_MODEL,
+    resolve_realtime_model_id,
+)
 from app.core.prompt_store import get_prompt
+from app.core.compliance import allows_call_transcript
+from app.core.crm_tools import agent_tool_enabled
 from app.tools.definitions import OPENAI_TOOLS
 
 AGENT_LANGUAGES: dict[str, str] = {"en": "English", "hi": "Hindi"}
@@ -94,7 +100,7 @@ VOICE_PREVIEW_INSTRUCTIONS: dict[str, str] = {
 
 VALID_VOICES = frozenset(str(v["id"]) for v in REALTIME_VOICE_CATALOG)
 
-REALTIME_MODEL = "gpt-realtime-2"
+REALTIME_MODEL = DEFAULT_REALTIME_MODEL
 DEFAULT_VOICE = "marin"
 
 END_CALL_TOOL: dict[str, Any] = {
@@ -197,6 +203,25 @@ def resolve_agent_voice(
     return fb
 
 
+def resolve_agent_model(
+    agent: dict | None,
+    *,
+    override: str | None = None,
+    fallback: str | None = None,
+) -> str:
+    fb = (fallback or REALTIME_MODEL).strip()
+    voice_settings = (agent or {}).get("voice_settings") or {}
+    from_agent = ""
+    if isinstance(voice_settings, dict):
+        from_agent = str(voice_settings.get("model") or "").strip()
+    over = (override or "").strip()
+    if over:
+        return resolve_realtime_model_id(over, fallback=fb)
+    if from_agent:
+        return resolve_realtime_model_id(from_agent, fallback=fb)
+    return resolve_realtime_model_id(fb, fallback=REALTIME_MODEL)
+
+
 def agent_allow_interrupt(agent: dict | None, *, default: bool = True) -> bool:
     voice_settings = (agent or {}).get("voice_settings") or {}
     if isinstance(voice_settings, dict) and voice_settings.get("allow_interrupt") is False:
@@ -207,13 +232,12 @@ def agent_allow_interrupt(agent: dict | None, *, default: bool = True) -> bool:
 def resolve_agent_tools(agent: dict | None, *, tools_enabled: bool = True) -> list[dict[str, Any]]:
     if not tools_enabled:
         return []
-    enabled = (agent or {}).get("tools")
-    if not isinstance(enabled, dict) or not enabled:
-        return list(OPENAI_TOOLS)
     selected = [
-        tool for tool in OPENAI_TOOLS if _truthy(enabled.get(tool.get("name")))
+        tool
+        for tool in OPENAI_TOOLS
+        if agent_tool_enabled(agent, tool.get("name") or "", default=True)
     ]
-    return selected or list(OPENAI_TOOLS)
+    return selected
 
 
 def turn_detection_for_agent(
@@ -273,6 +297,7 @@ def build_realtime_session(
         fallback=DEFAULT_VOICE,
     )
     tools = resolve_agent_tools(agent)
+    chosen_model = resolve_agent_model(agent)
     vad_base = PRACTICE_TURN_DETECTION if mode == "practice" else TURN_DETECTION
     turn_detection = turn_detection_for_agent(agent, base=vad_base)
 
@@ -293,7 +318,11 @@ def build_realtime_session(
             "input": {
                 "turn_detection": turn_detection,
                 "noise_reduction": {"type": "near_field"},
-                "transcription": {"model": "gpt-4o-transcribe"},
+                **(
+                    {"transcription": {"model": "gpt-4o-transcribe"}}
+                    if allows_call_transcript(agent)
+                    else {}
+                ),
             },
             "output": {
                 "voice": chosen_voice,
@@ -302,12 +331,11 @@ def build_realtime_session(
 
     session: dict[str, Any] = {
         "type": "realtime",
+        "model": chosen_model,
         "instructions": composed,
         "tools": tools,
         "tool_choice": "auto" if tools else "none",
         "output_modalities": ["audio"],
         "audio": audio,
     }
-    if mode == "practice":
-        session["model"] = REALTIME_MODEL
     return session

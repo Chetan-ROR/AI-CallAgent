@@ -13,7 +13,10 @@ from app.core.prompt_builder import (
     waiting_instructions,
 )
 from app.llc.client import LlcClient, get_agent_prefetch, get_crm_prefetch
+from app.core.crm_tools import agent_needs_crm_fetch, agent_tool_enabled
 from app.core.realtime import (
+    REALTIME_MODEL,
+    resolve_agent_model,
     resolve_agent_tools,
     resolve_agent_voice,
     turn_detection_for_agent,
@@ -193,6 +196,14 @@ async def _cancel_task(task):
 
 
 async def load_crm_context(stream_info: dict, *, force: bool = False):
+    agent = stream_info.get("agent") or {}
+    if not agent_needs_crm_fetch(agent):
+        stream_info["studio"] = {}
+        stream_info["member"] = {}
+        stream_info["crm_loaded"] = True
+        print("👤 CRM fetch skipped — no CRM tools enabled on this agent")
+        return
+
     client_id = stream_info.get("client_id")
     member_id = stream_info.get("member_id")
 
@@ -302,7 +313,11 @@ async def enable_listening_session(openai, stream_info):
     try:
         if not stream_info.get("crm_loaded"):
             await load_crm_context(stream_info)
-        elif stream_info.get("member_id") and not (stream_info.get("member") or {}).get("id"):
+        elif (
+            agent_tool_enabled(stream_info.get("agent"), "crm_member", default=False)
+            and stream_info.get("member_id")
+            and not (stream_info.get("member") or {}).get("id")
+        ):
             await load_crm_context(stream_info, force=True)
         member = stream_info.get("member")
         if is_known_member(member):
@@ -684,9 +699,10 @@ async def receive_from_openai(live, ws, stream_info):
 
 
 class RealtimeSession:
-    def __init__(self, connection, openai):
+    def __init__(self, connection, openai, *, model: str):
         self.connection = connection
         self.openai = openai
+        self.model = model
         self.events = asyncio.Queue()
         self.closed = False
         self._pump = asyncio.create_task(self._run_pump())
@@ -725,15 +741,16 @@ _pool_session: RealtimeSession | None = None
 _pool_opening: asyncio.Task | None = None
 
 
-async def _create_live_session():
+async def _create_live_session(model: str | None = None):
+    chosen = (model or REALTIME_MODEL).strip()
     started = time.time()
-    print("🔌 Opening OpenAI Realtime...")
+    print("🔌 Opening OpenAI Realtime...", chosen)
     connection = client.realtime.connect(
-        model="gpt-realtime-2",
+        model=chosen,
         websocket_connection_options=REALTIME_WS_OPTIONS,
     )
     openai = await connection.__aenter__()
-    live = RealtimeSession(connection, openai)
+    live = RealtimeSession(connection, openai, model=chosen)
     try:
         await openai.session.update(
             session=_session_config(
@@ -750,11 +767,12 @@ async def _create_live_session():
     return live
 
 
-async def ensure_openai_ready():
+async def ensure_openai_ready(*, model: str | None = None):
     global _pool_session, _pool_opening
+    wanted = (model or REALTIME_MODEL).strip()
 
     async with _pool_lock:
-        if _pool_session and _pool_session.alive:
+        if _pool_session and _pool_session.alive and _pool_session.model == wanted:
             return _pool_session
 
         if _pool_session:
@@ -762,7 +780,7 @@ async def ensure_openai_ready():
             _pool_session = None
 
         if _pool_opening is None or _pool_opening.done():
-            _pool_opening = asyncio.create_task(_create_live_session())
+            _pool_opening = asyncio.create_task(_create_live_session(wanted))
         opening = _pool_opening
 
     try:
@@ -812,17 +830,20 @@ async def recycle_openai_pool_after_outbound_dial():
     print("🔁 OpenAI pool recycled for incoming media stream (fresh session warming)")
 
 
-async def take_openai_session():
+async def take_openai_session(*, required_model: str | None = None):
     global _pool_session
+    wanted = resolve_agent_model(None, override=required_model)
     last_err = None
     for attempt in range(1, 3):
-        live = await ensure_openai_ready()
+        live = await ensure_openai_ready(model=wanted)
         async with _pool_lock:
             if _pool_session is live:
                 _pool_session = None
-        if live.alive:
+        if live.alive and live.model == wanted:
             prepare_openai_connection()
             return live
+        if live.alive:
+            await live.close()
         last_err = "OpenAI realtime connection closed before the call"
         print(f"⚠️ Stale OpenAI session (attempt {attempt}/2) — reopening...")
         async with _pool_lock:
@@ -923,9 +944,10 @@ async def media_stream(ws: WebSocket):
         nonlocal live, openai, listener_task
         if openai is not None:
             return openai
-        live = await take_openai_session()
+        agent_model = resolve_agent_model(stream_info.get("agent"))
+        live = await take_openai_session(required_model=agent_model)
         openai = live.openai
-        print("✅ OpenAI Connected")
+        print("✅ OpenAI Connected", "model=", agent_model)
         listener_task = asyncio.create_task(
             receive_from_openai(live, ws, stream_info)
         )
@@ -986,10 +1008,8 @@ async def media_stream(ws: WebSocket):
                 print("📞", stream_info["call_sid"], stream_info["phone"])
                 mark_media_stream_started(stream_info.get("call_sid"))
 
-                await asyncio.gather(
-                    load_agent_context(stream_info),
-                    load_crm_context(stream_info),
-                )
+                await load_agent_context(stream_info)
+                await load_crm_context(stream_info)
 
                 try:
                     await attach_openai()

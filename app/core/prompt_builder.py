@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.core.compliance import recording_consent_message
+from app.core.crm_tools import agent_needs_crm_fetch, agent_tool_enabled
 from app.core.realtime import agent_language_instructions
 from app.core.prompts import F45_SYSTEM_PROMPT
 
@@ -52,6 +54,15 @@ def agent_first_message(agent=None) -> str:
     return DEFAULT_FIRST_MESSAGE
 
 
+def agent_spoken_opening(agent=None, member: dict | None = None, studio: dict | None = None) -> str:
+    """Greeting the caller hears, including the recording-consent line when set."""
+    opening = apply_contact_tokens(agent_first_message(agent), member, studio).strip()
+    consent = apply_contact_tokens(recording_consent_message(agent), member, studio).strip()
+    if consent and opening:
+        return f"{consent} {opening}"
+    return consent or opening
+
+
 def apply_contact_tokens(
     text: str,
     member: dict | None = None,
@@ -78,6 +89,7 @@ def apply_contact_tokens(
         .replace("{{contact.email}}", email)
         .replace("{{contact.phone}}", phone)
         .replace("{{studio.name}}", studio_name)
+        .replace("{{company.name}}", studio_name)
     )
 
 
@@ -105,11 +117,11 @@ def _agent_phase_instructions(
 
 
 def greeting_instructions(agent=None, member: dict | None = None, studio: dict | None = None) -> str:
-    opening = agent_first_message(agent)
+    opening = agent_spoken_opening(agent, member, studio)
     phase = f"""
 You are on a live outbound phone call.
 
-Say this one line, then STOP completely:
+Say this opening, then STOP completely. If it includes a recording notice, say that first, then the greeting. Do not add anything else:
 "{opening}"
 
 Rules until the customer answers:
@@ -453,32 +465,66 @@ def is_known_member(member: dict | None) -> bool:
     return True
 
 
-def _agent_crm_context(member: dict, studio: dict, *, studio_name: str, studio_location: str) -> str:
-    """CRM facts for LLC-configured agents — no outbound sales script."""
-    if is_known_member(member):
-        first_name = member_display_first_name(member) or _value(member, "first_name", default="")
-        member_block = f"""
+def build_crm_prompt_addon(
+    agent: dict | None,
+    member: dict,
+    studio: dict,
+    *,
+    studio_name: str,
+    studio_location: str,
+) -> str:
+    """CRM text blocks — only sections whose crm_* tools are enabled on the agent."""
+    if not agent_needs_crm_fetch(agent):
+        return ""
+
+    parts: list[str] = ["\n# LIVE CRM CONTEXT (ground truth from studio CRM)\n"]
+    parts.append(f"Studio: {studio_name}\nStudio location: {studio_location}")
+
+    if agent_tool_enabled(agent, "crm_member", default=False):
+        if is_known_member(member):
+            first_name = member_display_first_name(member) or _value(member, "first_name", default="")
+            parts.append(
+                f"""
 Member CRM id: {member.get("id")}
 Membership: {_membership_line(member.get("membership"))}
 Total visits: {member.get("total_visits", 0)}
 Last visit: {_visit_line(member.get("last_visit"))}
 Next visit: {_visit_line(member.get("next_visit"))}
 Use their first name ({first_name or "from CRM"}) when appropriate.
-"""
-    else:
-        member_block = """
-No matching member profile for this call. Do not invent their name or visit history.
-"""
-    return f"""
+""".strip()
+            )
+        else:
+            parts.append(
+                "No matching member profile for this call. Do not invent their name or visit history."
+            )
 
-# LIVE CRM CONTEXT (ground truth from studio CRM)
+    if agent_tool_enabled(agent, "crm_class_schedule", default=False):
+        parts.append(_class_schedule_block(studio).strip())
+        parts.append(
+            "When they ask about class days or times, use the CLASS SCHEDULE section — do not guess."
+        )
 
-Studio: {studio_name}
-Studio location: {studio_location}
-{member_block.strip()}
-When they ask about class days or times, use the CLASS SCHEDULE section — do not guess.
-{_offerings_block(studio)}
-"""
+    if agent_tool_enabled(agent, "crm_pricing", default=False):
+        parts.append(_offerings_block(studio).strip())
+
+    return "\n\n".join(parts) + "\n"
+
+
+def _agent_crm_context(
+    member: dict,
+    studio: dict,
+    agent: dict | None,
+    *,
+    studio_name: str,
+    studio_location: str,
+) -> str:
+    return build_crm_prompt_addon(
+        agent,
+        member,
+        studio,
+        studio_name=studio_name,
+        studio_location=studio_location,
+    )
 
 
 def build_instructions(member: dict | None = None, studio: dict | None = None, agent: dict | None = None) -> str:
@@ -502,73 +548,50 @@ def build_instructions(member: dict | None = None, studio: dict | None = None, a
         studio_name = "Total Bizz gym"
     studio_location = _value(studio, "location", default="6322 Clayton Avenue, 63139")
 
+    crm_addon = build_crm_prompt_addon(
+        agent,
+        member,
+        studio,
+        studio_name=studio_name,
+        studio_location=studio_location,
+    )
+
     if use_agent_prompt_only(agent):
-        return _attach_language_policy(
-            prompt
-            + _agent_crm_context(
-                member,
-                studio,
-                studio_name=studio_name,
-                studio_location=studio_location,
-            ),
-            agent,
-        )
+        return _attach_language_policy(prompt + crm_addon, agent)
 
     if is_known_member(member):
         history = f"""
 
-# LIVE CRM CONTEXT
+# CALL CONTEXT
 
-This data was loaded from the studio CRM just before the call.
-Treat it as ground truth. Do not invent extra personal details.
-
-Studio: {studio_name}
-Studio location: {studio_location}
-Member CRM id: {member.get("id")}
-Mindbody client id: {member.get("mindbody_client_id") or "not linked yet"}
-Membership: {_membership_line(member.get("membership"))}
-Total visits: {member.get("total_visits", 0)}
-First visit: {_visit_line(member.get("first_visit"))}
-Last visit: {_visit_line(member.get("last_visit"))}
-Next visit: {_visit_line(member.get("next_visit"))}
-
-Use the customer's real first name ({first_name or "from CRM"}). Never ask what name to put this under — you already have their CRM profile.
-After they answer the classes-or-memberships question, share CRM details briefly, then ask about the free trainer consult.
+Use the customer's real first name ({first_name or "from CRM"}) when CRM member data is available in the prompt.
+After they answer the classes-or-memberships question, share CRM details briefly (only if present below), then ask about the free trainer consult.
 Do not call send_sms. Do not promise a text.
 If they want the free consult: thank them by first name, say someone from Total Bizz gym will reach out to schedule it, say thanks for your time, then end_call — do not hang up the instant they say yes.
 Do not create a member. Do not book them into a class on this call unless your tools explicitly allow it.
-When they ask about class days or times, use the CLASS SCHEDULE section below — do not guess.
-{_offerings_block(studio)}
 """
     else:
         history = f"""
 
-# LIVE CRM CONTEXT
+# CALL CONTEXT
 
-No matching member profile was found in the studio CRM for this phone number.
 Studio: {studio_name}
 Studio location: {studio_location}
 
-This is a NEW / unknown number. Do not say they created a profile a while back.
+This is a NEW / unknown number unless member CRM data appears below.
 Do not invent the customer's name, email, visit history, or membership status.
 After they agree to talk, you may pitch. Not before they have clearly said yes, sure, okay, or that they have a minute.
-Do not invent the customer's name, email, visit history, or membership status.
 
-Tell them what the studio offers using the CRM class types and membership plans below. Do not invent extra plans or prices.
-
-After the "classes or membership plans" question, if they pick classes, name 2-4 from CRM; if memberships, name the plans (and prices only if listed); if both, keep it to one short turn each.
-Then ask if they want the free trainer consult.
+Tell them what the studio offers using CRM sections below when present. Do not invent extra plans or prices.
 
 OVERRIDE: Do not call send_sms. Do not use iMessage. Do not promise a text. Do not create a CRM member.
 If they are interested in the free trainer consult (yes, sure, book it, sign me up):
 1. Do NOT call end_call on the same turn they said yes.
 2. Do not save them in CRM and do not invent a booking time.
 3. NEW caller (no CRM member name): ask ONE question — "Great — what name should I put this under?" — then wait.
-4. After they give a name (or if you already have their first name from CRM): say "Perfect, someone from Total Bizz gym will reach out to schedule your free trainer consult. Thanks for your time — have a good one." Then call end_call.
+4. After they give a name: say "Perfect, someone from Total Bizz gym will reach out to schedule your free trainer consult. Thanks for your time — have a good one." Then call end_call.
 5. Do not hang up before that thank-you line.
-When they ask about class days or times, use the CLASS SCHEDULE section below — do not guess or invent times.
 Do not invent a booking or say they are locked in for a visit unless staff confirmed it.
-{_offerings_block(studio)}
 """
 
-    return _attach_language_policy(prompt + history, agent)
+    return _attach_language_policy(prompt + history + crm_addon, agent)

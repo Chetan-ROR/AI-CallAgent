@@ -156,8 +156,12 @@ def _build_stream_twiml(
     agent_id=None,
     phone=None,
     status_callback=None,
+    record: bool = False,
 ) -> str:
     response = VoiceResponse()
+    if record:
+        start = response.start()
+        start.recording(channels="dual")
     response.say("One moment please.")
     connect = response.connect()
     stream_kwargs = {"url": stream_url}
@@ -176,7 +180,7 @@ def _build_stream_twiml(
     return str(response)
 
 
-def _twiml_stream_response(*, stream_url: str, member_id=None, client_id=None, agent_id=None, phone=None, status_callback=None) -> Response:
+def _twiml_stream_response(*, stream_url: str, member_id=None, client_id=None, agent_id=None, phone=None, status_callback=None, record: bool = False) -> Response:
     return Response(
         content=_build_stream_twiml(
             stream_url=stream_url,
@@ -185,6 +189,7 @@ def _twiml_stream_response(*, stream_url: str, member_id=None, client_id=None, a
             agent_id=agent_id,
             phone=phone,
             status_callback=status_callback,
+            record=record,
         ),
         media_type="text/xml",
     )
@@ -411,6 +416,7 @@ async def _place_outbound_call(
         )
 
     llc = LlcClient()
+    agent = None
     if llc.enabled:
         agent_lookup = await llc.lookup_agent(
             client_id=client_id,
@@ -442,36 +448,41 @@ async def _place_outbound_call(
                 (agent_lookup or {}).get("error") or "no active agent for this client",
             )
 
-        lookup = await llc.lookup_member(client_id=client_id, member_id=member_id)
-        studio = lookup.get("studio") or {}
-        if studio.get("id"):
-            client_id = studio.get("id")
-        if lookup.get("success") and studio:
-            save_crm_prefetch(client_id, member_id, lookup)
-            class_catalog = studio.get("classes") or []
-            schedule_rows = sum(
-                len(item.get("schedules") or [])
-                for item in class_catalog
-                if isinstance(item, dict)
-            )
-            print(
-                "👤 Studio catalog loaded:",
-                len(studio.get("class_names") or []),
-                "classes,",
-                len(class_catalog),
-                "with schedules,",
-                schedule_rows,
-                "schedule rows,",
-                len(studio.get("membership_plans") or []),
-                "plans",
-            )
-            if lookup.get("found") and lookup.get("member"):
-                print("👤 CRM member:", lookup.get("member", {}).get("first_name"), member_id)
+        from app.core.crm_tools import agent_needs_crm_fetch
+
+        if agent and agent_needs_crm_fetch(agent):
+            lookup = await llc.lookup_member(client_id=client_id, member_id=member_id)
+            studio = lookup.get("studio") or {}
+            if studio.get("id"):
+                client_id = studio.get("id")
+            if lookup.get("success") and studio:
+                save_crm_prefetch(client_id, member_id, lookup)
+                class_catalog = studio.get("classes") or []
+                schedule_rows = sum(
+                    len(item.get("schedules") or [])
+                    for item in class_catalog
+                    if isinstance(item, dict)
+                )
+                print(
+                    "👤 Studio catalog loaded:",
+                    len(studio.get("class_names") or []),
+                    "classes,",
+                    len(class_catalog),
+                    "with schedules,",
+                    schedule_rows,
+                    "schedule rows,",
+                    len(studio.get("membership_plans") or []),
+                    "plans",
+                )
+                if lookup.get("found") and lookup.get("member"):
+                    print("👤 CRM member:", lookup.get("member", {}).get("first_name"), member_id)
+            else:
+                print(
+                    "⚠️ Studio catalog not loaded:",
+                    (lookup or {}).get("error") or "LLC lookup failed",
+                )
         else:
-            print(
-                "⚠️ Studio catalog not loaded:",
-                lookup.get("error") or "LLC lookup failed",
-            )
+            print("👤 CRM prefetch skipped — no CRM tools enabled on agent")
     elif member_id and client_id:
         print("📞 LLC API is not configured — placing call without CRM")
     else:
@@ -480,6 +491,9 @@ async def _place_outbound_call(
     print("🌤️ Public base for Twilio:", http_base)
     if wss_base and wss_base.rstrip("/") != http_base.rstrip("/"):
         print("🎧 Media Stream WSS host:", wss_base, "(HTTP callbacks:", http_base + ")")
+    from app.core.compliance import allows_audio_recording
+
+    record_call = bool(agent) and allows_audio_recording(agent)
     twiml = _build_stream_twiml(
         stream_url=stream_url,
         member_id=member_id,
@@ -487,7 +501,9 @@ async def _place_outbound_call(
         agent_id=agent_id,
         phone=phone,
         status_callback=f"{http_base}/stream-status",
+        record=record_call,
     )
+    print("🎙️ Call recording:", "on" if record_call else "off")
     print("🎧 Outbound call uses inline TwiML (no answer-time webhook):", stream_url)
     if member_id:
         print("👤 make-call member_id:", member_id)

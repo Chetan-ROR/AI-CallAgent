@@ -8,13 +8,15 @@ from openai import APIError, OpenAI
 from pydantic import BaseModel, Field
 
 from app.core.config import OPENAI_API_KEY
-from app.core.prompt_builder import agent_first_message, build_instructions
+from app.core.prompt_builder import agent_spoken_opening, build_instructions
+from app.core.crm_tools import AGENT_TOOL_CATALOG, agent_needs_crm_fetch
+from app.core.openai_realtime_models import get_realtime_models_catalog
 from app.core.realtime import (
-    REALTIME_MODEL,
     REALTIME_VOICE_CATALOG,
     VALID_VOICES,
     VOICE_PREVIEW_INSTRUCTIONS,
     build_realtime_session,
+    resolve_agent_model,
 )
 from app.llc.client import LlcClient
 
@@ -45,6 +47,19 @@ class VoicePreviewRequest(BaseModel):
 def list_realtime_voices():
     """OpenAI Realtime built-in voices for agent configuration."""
     return {"voices": list(REALTIME_VOICE_CATALOG)}
+
+
+@router.get("/practice/agent-tools")
+def list_agent_tools():
+    """Agent tool toggles (OpenAI functions + CRM prompt data sources)."""
+    return {"tools": list(AGENT_TOOL_CATALOG)}
+
+
+@router.get("/practice/models")
+def list_realtime_models():
+    """Realtime speech models your OpenAI API key can use (live from GET /v1/models)."""
+    models, source = get_realtime_models_catalog(force_refresh=True)
+    return {"models": models, "source": source}
 
 
 def _speech_preview_bytes(*, voice: str, text: str) -> bytes:
@@ -110,14 +125,17 @@ async def _practice_llc_context(
     if not llc.enabled:
         return member, studio, agent
 
-    crm = await llc.lookup_member(client_id=client_id, member_id=member_id)
-    if (crm or {}).get("success"):
-        studio = crm.get("studio") or {}
-        member = crm.get("member") or {}
-
     agent_res = await llc.lookup_agent(client_id=client_id, agent_id=agent_id)
     if (agent_res or {}).get("success"):
         agent = agent_res.get("agent") or {}
+
+    if agent_needs_crm_fetch(agent):
+        crm = await llc.lookup_member(client_id=client_id, member_id=member_id)
+        if (crm or {}).get("success"):
+            studio = crm.get("studio") or {}
+            member = crm.get("member") or {}
+    else:
+        print("👤 Practice CRM skipped — no CRM tools enabled on agent")
 
     return member, studio, agent
 
@@ -146,7 +164,7 @@ async def create_practice_session(body: Optional[PracticeSessionRequest] = None)
         if agent or studio:
             instructions = build_instructions(member, studio, agent)
         if agent:
-            first_message = agent_first_message(agent) or first_message
+            first_message = agent_spoken_opening(agent, member, studio) or first_message
 
     try:
         secret = client.realtime.client_secrets.create(
@@ -173,5 +191,5 @@ async def create_practice_session(body: Optional[PracticeSessionRequest] = None)
     return {
         "value": secret.value,
         "expires_at": secret.expires_at,
-        "model": REALTIME_MODEL,
+        "model": resolve_agent_model(agent or None),
     }
