@@ -11,7 +11,7 @@ CRM_TOOL_KEYS: frozenset[str] = frozenset(
     }
 )
 
-OPENAI_FUNCTION_TOOL_KEYS: frozenset[str] = frozenset({"end_call"})
+OPENAI_FUNCTION_TOOL_KEYS: frozenset[str] = frozenset({"end_call", "book_guest_pass"})
 
 AGENT_TOOL_CATALOG: tuple[dict[str, Any], ...] = (
     {
@@ -20,6 +20,13 @@ AGENT_TOOL_CATALOG: tuple[dict[str, Any], ...] = (
         "label": "End call",
         "description": "Let the agent hang up after a short goodbye.",
         "default_enabled": True,
+    },
+    {
+        "key": "book_guest_pass",
+        "kind": "realtime",
+        "label": "7 Day Guest Pass",
+        "description": "Offer and book only the 7 Day Guest Pass. Creates a member first when the caller is new. No payment.",
+        "default_enabled": False,
     },
     {
         "key": "crm_member",

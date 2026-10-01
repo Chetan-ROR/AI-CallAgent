@@ -8,3 +8,4 @@ pydantic
 eval_type_backport
 sqlalchemy
 python-multipart
+boto3

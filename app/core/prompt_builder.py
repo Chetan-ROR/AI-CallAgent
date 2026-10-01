@@ -69,6 +69,7 @@ def tool_source_policy(agent=None) -> str:
     member_on = agent_tool_enabled(agent, "crm_member", default=False)
     classes_on = agent_tool_enabled(agent, "crm_class_schedule", default=False)
     pricing_on = agent_tool_enabled(agent, "crm_pricing", default=False)
+    guest_pass_on = agent_tool_enabled(agent, "book_guest_pass", default=False)
     end_on = end_call_enabled(agent)
 
     member_rule = (
@@ -81,11 +82,29 @@ def tool_source_policy(agent=None) -> str:
         if classes_on
         else "Class schedule is OFF. Do not name classes, days, or class times. If they ask, say you don't have the class schedule on this call."
     )
-    pricing_rule = (
-        "Pricing & plans is ON. Membership plans, packs, and prices come only from the pricing section. Do not quote a plan or dollar amount from the agent script unless that same row is in the pricing section."
-        if pricing_on
-        else "Pricing & plans is OFF. Do not name membership plans, packs, discounts, or prices. If they ask, say you don't have plan details on this call."
-    )
+    if guest_pass_on:
+        pricing_rule = (
+            "7 Day Guest Pass is ON. The only plan you may offer or book is the 7 Day Guest Pass. "
+            "Do not name, quote, or sell any other membership, pack, discount, or price. "
+            "There is no payment and no card. "
+            "Offer the 7 Day Guest Pass in its own turn, then stop and wait. "
+            "Do not call book_guest_pass on the greeting, on their first words, or before they clearly say yes. "
+            "A yes to talking is not a yes to the pass. "
+            "After a clear yes, call book_guest_pass. "
+            "If they are not already a member, ask for first name, last name, and email first, then call the tool. "
+            "If the tool says they are not linked to Mindbody and need an email, ask for the missing name or email and call the tool again. "
+            "The phone number is already on the call. Creating that member and booking this pass is allowed. "
+            "When the tool says the pass is booked, say only that it is on their account, in one sentence, with no question. "
+            "Ignore older lines that say not to create a member or not to book."
+        )
+    elif pricing_on:
+        pricing_rule = (
+            "Pricing & plans is ON. Membership plans, packs, and prices come only from the pricing section. Do not quote a plan or dollar amount from the agent script unless that same row is in the pricing section."
+        )
+    else:
+        pricing_rule = (
+            "Pricing & plans is OFF. Do not name membership plans, packs, discounts, or prices. If they ask, say you don't have plan details on this call."
+        )
     end_rule = (
         "End call is ON. Hang up only by calling the end_call tool, and only after a short goodbye."
         if end_on
@@ -515,7 +534,15 @@ Use their first name ({first_name or "from CRM"}) when appropriate.
     if agent_tool_enabled(agent, "crm_class_schedule", default=False):
         parts.append(_class_schedule_block(studio).strip())
 
-    if agent_tool_enabled(agent, "crm_pricing", default=False):
+    if agent_tool_enabled(agent, "book_guest_pass", default=False):
+        parts.append(
+            "# PLAN YOU MAY OFFER\n\n"
+            "Only offer the 7 Day Guest Pass. Do not read any other plan from the script or from CRM.\n"
+            "Ask if they want it, then wait. Call book_guest_pass only after a clear yes to that pass.\n"
+            "For a new caller, collect first name, last name, and email first.\n"
+            "After it books, say it is on their account in one sentence and do not ask a question in that sentence."
+        )
+    elif agent_tool_enabled(agent, "crm_pricing", default=False):
         parts.append(_membership_block(studio).strip())
 
     return "\n\n".join(parts) + "\n"

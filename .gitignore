@@ -5,6 +5,7 @@ bin/
 __pycache__/
 *.pyc
 *.db
+recordings/
 frontend/node_modules/
 frontend/.next/
 frontend/.env.local

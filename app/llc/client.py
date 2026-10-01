@@ -106,6 +106,101 @@ class LlcClient:
             params=params,
         )
 
+    async def book_guest_pass(
+        self,
+        *,
+        client_id=None,
+        phone=None,
+        member_id=None,
+        first_name=None,
+        last_name=None,
+        email=None,
+    ):
+        return await self._request(
+            "POST",
+            "/ai/guest_pass",
+            json_body={
+                "client_id": self._client_id(client_id),
+                "phone": phone,
+                "member_id": member_id,
+                "first_name": first_name,
+                "last_name": last_name,
+                "email": email,
+            },
+        )
+
+    async def open_phone_call(
+        self,
+        *,
+        client_id=None,
+        call_sid=None,
+        agent_id=None,
+        member_id=None,
+        phone=None,
+        recording_status="pending",
+        direction=None,
+        answered=None,
+    ):
+        body = {
+            "client_id": self._client_id(client_id),
+            "call_sid": call_sid,
+            "agent_id": agent_id,
+            "member_id": member_id,
+            "phone": phone,
+            "recording_status": recording_status,
+        }
+        if direction:
+            body["direction"] = direction
+        if answered is not None:
+            body["answered"] = answered
+        return await self._request("POST", "/ai/phone_calls", json_body=body)
+
+    async def update_phone_call_status(
+        self,
+        *,
+        client_id=None,
+        call_sid=None,
+        twilio_status=None,
+        phone=None,
+        direction=None,
+        duration_seconds=None,
+    ):
+        body = {
+            "client_id": self._client_id(client_id),
+            "call_sid": call_sid,
+            "twilio_status": twilio_status,
+        }
+        if phone:
+            body["phone"] = phone
+        if direction:
+            body["direction"] = direction
+        if duration_seconds not in (None, ""):
+            body["duration_seconds"] = duration_seconds
+        return await self._request("PATCH", "/ai/phone_calls", json_body=body)
+
+    async def complete_phone_call(
+        self,
+        *,
+        client_id=None,
+        call_sid=None,
+        recording_status=None,
+        storage=None,
+        recording_key=None,
+        duration_seconds=None,
+    ):
+        return await self._request(
+            "PATCH",
+            "/ai/phone_calls",
+            json_body={
+                "client_id": self._client_id(client_id),
+                "call_sid": call_sid,
+                "recording_status": recording_status,
+                "storage": storage,
+                "recording_key": recording_key,
+                "duration_seconds": duration_seconds,
+            },
+        )
+
 
 _crm_prefetch = {}
 _agent_prefetch = {}

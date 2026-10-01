@@ -40,6 +40,16 @@ load_dotenv()
 router = APIRouter()
 
 
+async def _save_phone_call(**kwargs):
+    if not kwargs.get("client_id") or not kwargs.get("call_sid") or not kwargs.get("phone"):
+        return
+    try:
+        result = await LlcClient().open_phone_call(**kwargs)
+        print("📞 Phone call saved:", result.get("success"), result.get("error") or "")
+    except Exception as exc:
+        print("📞 Phone call save failed:", repr(exc))
+
+
 async def _twilio_form_payload(request: Request) -> dict:
     try:
         return dict(await asyncio.wait_for(request.form(), timeout=2.0))
@@ -156,12 +166,8 @@ def _build_stream_twiml(
     agent_id=None,
     phone=None,
     status_callback=None,
-    record: bool = False,
 ) -> str:
     response = VoiceResponse()
-    if record:
-        start = response.start()
-        start.recording(channels="dual")
     response.say("One moment please.")
     connect = response.connect()
     stream_kwargs = {"url": stream_url}
@@ -180,7 +186,7 @@ def _build_stream_twiml(
     return str(response)
 
 
-def _twiml_stream_response(*, stream_url: str, member_id=None, client_id=None, agent_id=None, phone=None, status_callback=None, record: bool = False) -> Response:
+def _twiml_stream_response(*, stream_url: str, member_id=None, client_id=None, agent_id=None, phone=None, status_callback=None) -> Response:
     return Response(
         content=_build_stream_twiml(
             stream_url=stream_url,
@@ -189,7 +195,6 @@ def _twiml_stream_response(*, stream_url: str, member_id=None, client_id=None, a
             agent_id=agent_id,
             phone=phone,
             status_callback=status_callback,
-            record=record,
         ),
         media_type="text/xml",
     )
@@ -204,10 +209,12 @@ async def incoming_call(
     phone: str | None = None,
 ):
     call_sid = None
+    caller_phone = None
     try:
         if request.method == "POST":
             form = dict(await asyncio.wait_for(request.form(), timeout=2.0))
             call_sid = form.get("CallSid")
+            caller_phone = form.get("From")
     except Exception:
         pass
     print(
@@ -232,7 +239,19 @@ async def incoming_call(
         if wss_base and wss_base.rstrip("/") != http_base.rstrip("/"):
             print("🎧 Media Stream WSS host:", wss_base, "(HTTP callbacks:", http_base + ")")
         resolved_client_id = client_id or LLC_CLIENT_ID
-        resolved_phone = phone
+        resolved_phone = phone or caller_phone
+        if call_sid and resolved_client_id and resolved_phone:
+            await _save_phone_call(
+                client_id=resolved_client_id,
+                call_sid=call_sid,
+                agent_id=agent_id,
+                phone=resolved_phone,
+                direction="inbound",
+                answered=True,
+                recording_status="pending",
+            )
+        elif call_sid and not resolved_client_id:
+            print("📥 Inbound call not saved — Twilio number is not tied to a studio")
 
         prepare_openai_connection()
         mark_public_webhook_ok(http_base)
@@ -302,6 +321,23 @@ async def call_status(request: Request):
         except (TypeError, ValueError):
             pass
     note_call_status(sid, status)
+    client_id = request.query_params.get("client_id")
+    direction = payload.get("Direction")
+    phone = payload.get("From") if direction == "inbound" else payload.get("To")
+    if sid and status and client_id:
+        try:
+            result = await LlcClient().update_phone_call_status(
+                client_id=client_id,
+                call_sid=sid,
+                twilio_status=status,
+                phone=phone,
+                direction=direction,
+                duration_seconds=payload.get("CallDuration"),
+            )
+            if not result.get("success"):
+                print("📞 Phone call status not saved:", result.get("error") or status)
+        except Exception as exc:
+            print("📞 Phone call status save failed:", repr(exc))
     return Response(content="ok", media_type="text/plain")
 
 
@@ -491,9 +527,6 @@ async def _place_outbound_call(
     print("🌤️ Public base for Twilio:", http_base)
     if wss_base and wss_base.rstrip("/") != http_base.rstrip("/"):
         print("🎧 Media Stream WSS host:", wss_base, "(HTTP callbacks:", http_base + ")")
-    from app.core.compliance import allows_audio_recording
-
-    record_call = bool(agent) and allows_audio_recording(agent)
     twiml = _build_stream_twiml(
         stream_url=stream_url,
         member_id=member_id,
@@ -501,9 +534,8 @@ async def _place_outbound_call(
         agent_id=agent_id,
         phone=phone,
         status_callback=f"{http_base}/stream-status",
-        record=record_call,
     )
-    print("🎙️ Call recording:", "on" if record_call else "off")
+    print("🎙️ Call audio will be saved from the media stream, not Twilio")
     print("🎧 Outbound call uses inline TwiML (no answer-time webhook):", stream_url)
     if member_id:
         print("👤 make-call member_id:", member_id)
@@ -518,7 +550,11 @@ async def _place_outbound_call(
             to=phone,
             from_=TWILIO_PHONE_NUMBER,
             twiml=twiml,
-            status_callback=f"{http_base}/call-status",
+            status_callback=(
+                f"{http_base}/call-status?client_id={client_id}"
+                if client_id
+                else f"{http_base}/call-status"
+            ),
             status_callback_event=[
                 "initiated",
                 "ringing",
@@ -550,6 +586,16 @@ async def _place_outbound_call(
 
     _record_dial(phone, call.sid)
     print(call.sid)
+    await _save_phone_call(
+        client_id=client_id,
+        call_sid=call.sid,
+        agent_id=agent_id,
+        member_id=member_id,
+        phone=phone,
+        direction="outbound",
+        answered=False,
+        recording_status="pending",
+    )
     await recycle_openai_pool_after_outbound_dial()
     print(
         "📡 If the call is silent, confirm Twilio can reach:",

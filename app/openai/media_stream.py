@@ -14,6 +14,8 @@ from app.core.prompt_builder import (
 )
 from app.llc.client import LlcClient, get_agent_prefetch, get_crm_prefetch
 from app.core.crm_tools import agent_needs_crm_fetch, agent_tool_enabled
+from app.core.compliance import allows_audio_recording
+from app.core.call_recording import CallRecorder
 from app.core.realtime import (
     REALTIME_MODEL,
     resolve_agent_model,
@@ -21,7 +23,13 @@ from app.core.realtime import (
     resolve_agent_voice,
     turn_detection_for_agent,
 )
-from app.tools.dispatcher import dispatch_tool, parse_tool_arguments
+from app.tools.dispatcher import (
+    dispatch_tool,
+    note_caller_transcript,
+    note_caller_turn_after_offer,
+    note_guest_pass_offer,
+    parse_tool_arguments,
+)
 from app.tools.end_call import end_call
 from app.twilio.call_tracking import mark_media_stream_started
 
@@ -114,6 +122,7 @@ def _session_config(
                     "type": "audio/pcmu"
                 },
                 "turn_detection": turn_detection,
+                "transcription": {"model": "gpt-4o-transcribe"},
             },
             "output": {
                 "format": {
@@ -161,6 +170,9 @@ def _response_status(event):
 
 async def _twilio_clear(ws, stream_info):
     sid = stream_info.get("sid")
+    recorder = stream_info.get("recorder")
+    if recorder:
+        recorder.clear_outbound()
     if not sid:
         return
     try:
@@ -168,6 +180,69 @@ async def _twilio_clear(ws, stream_info):
         print("🔇 Twilio playback cleared")
     except Exception as exc:
         print("⚠️ Twilio clear failed:", repr(exc))
+
+
+async def open_call_record(stream_info: dict) -> None:
+    call_sid = (stream_info.get("call_sid") or "").strip()
+    phone = (stream_info.get("phone") or "").strip()
+    client_id = (stream_info.get("client_id") or "").strip()
+    if not call_sid or not phone or not client_id:
+        print("🎙️ Call record skipped — missing call_sid, phone, or client_id")
+        return
+
+    agent = stream_info.get("agent") or {}
+    member = stream_info.get("member") or {}
+    member_id = member.get("id") if is_known_member(member) else None
+    record_audio = bool(agent) and allows_audio_recording(agent)
+    if record_audio:
+        stream_info["recorder"] = CallRecorder(call_sid=call_sid, client_id=client_id)
+
+    try:
+        result = await LlcClient().open_phone_call(
+            client_id=client_id,
+            call_sid=call_sid,
+            agent_id=agent.get("id") or stream_info.get("agent_id"),
+            member_id=member_id,
+            phone=phone,
+            recording_status="pending" if record_audio else "skipped",
+        )
+        print("🎙️ Call record:", result.get("success"), result.get("error") or "")
+    except Exception as exc:
+        print("🎙️ Call record open failed:", repr(exc))
+
+
+async def finish_call_record(stream_info: dict) -> None:
+    call_sid = (stream_info.get("call_sid") or "").strip()
+    client_id = (stream_info.get("client_id") or "").strip()
+    if not call_sid or not client_id:
+        return
+
+    recorder = stream_info.get("recorder")
+    saved = None
+    duration = None
+    status = "skipped"
+    if recorder:
+        duration = recorder.duration_seconds()
+        try:
+            saved = await asyncio.to_thread(recorder.finish)
+        except Exception as exc:
+            print("🎙️ Recording save failed:", repr(exc))
+            status = "failed"
+        else:
+            status = "saved" if saved else "failed"
+
+    try:
+        result = await LlcClient().complete_phone_call(
+            client_id=client_id,
+            call_sid=call_sid,
+            recording_status=status,
+            storage=(saved or {}).get("storage"),
+            recording_key=(saved or {}).get("recording_key"),
+            duration_seconds=duration,
+        )
+        print("🎙️ Call record finished:", status, result.get("error") or (saved or {}).get("recording_key") or "")
+    except Exception as exc:
+        print("🎙️ Call record complete failed:", repr(exc))
 
 
 async def _cancel_active_response(openai, stream_info):
@@ -384,6 +459,30 @@ def _goodbye_playback_delay(spoken: str) -> float:
     return min(14.0, max(4.0, words * 0.55 + 2.0))
 
 
+def _playback_protected(stream_info: dict) -> bool:
+    until = stream_info.get("protect_playback_until") or 0
+    return time.monotonic() < until
+
+
+def _event_transcript(event) -> str:
+    for key in ("transcript", "text"):
+        value = getattr(event, key, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    item = getattr(event, "item", None)
+    content = getattr(item, "content", None) if item is not None else None
+    if not content:
+        return ""
+    parts = []
+    for part in content:
+        transcript = getattr(part, "transcript", None)
+        if transcript is None and isinstance(part, dict):
+            transcript = part.get("transcript")
+        if isinstance(transcript, str) and transcript.strip():
+            parts.append(transcript.strip())
+    return " ".join(parts).strip()
+
+
 def _is_goodbye_spoken(spoken: str) -> bool:
     text = (spoken or "").lower()
     if len(text) < 12:
@@ -522,16 +621,30 @@ async def receive_from_openai(live, ws, stream_info):
 
             elif event_type == "input_audio_buffer.speech_started":
                 stream_info["user_speaking"] = True
-                if stream_info.get("greeting_done") and not stream_info.get("awaiting_tool_speech"):
+                if _playback_protected(stream_info):
+                    print("🔇 Barge-in ignored — guest pass confirmation still playing")
+                elif stream_info.get("awaiting_tool_speech"):
+                    print("🔇 Barge-in ignored — tool reply still playing")
+                elif stream_info.get("greeting_done"):
                     await _twilio_clear(ws, stream_info)
                     await _cancel_active_response(openai, stream_info)
 
             elif event_type == "input_audio_buffer.speech_stopped":
                 stream_info["user_speaking"] = False
+                note_caller_turn_after_offer(stream_info)
+
+            elif event_type in (
+                "conversation.item.input_audio_transcription.completed",
+                "conversation.item.input_audio_transcription.done",
+            ):
+                note_caller_transcript(stream_info, _event_transcript(event))
 
             elif event_type == "response.output_audio.delta":
 
                 stream_info["audio_sent"] = True
+                recorder = stream_info.get("recorder")
+                if recorder and getattr(event, "delta", None):
+                    recorder.add_outbound(event.delta)
 
                 if stream_info["sid"]:
                     await ws.send_json(
@@ -604,6 +717,13 @@ async def receive_from_openai(live, ws, stream_info):
                 if spoken:
                     print("🗣️", spoken)
                     stream_info["failed_recovery"] = False
+                    note_guest_pass_offer(stream_info, spoken)
+                if stream_info.get("guest_pass_booked"):
+                    spoken_for_delay = spoken or "Your 7 Day Guest Pass is booked and on your account."
+                    delay = _goodbye_playback_delay(spoken_for_delay)
+                    stream_info["protect_playback_until"] = time.monotonic() + delay
+                    stream_info["guest_pass_booked"] = False
+                    print(f"🎟️ Confirmation playback protected for {delay:.1f}s")
                 elif info["status"] == "cancelled":
                     print("⚠️ AI speech cancelled (barge-in or new response)")
                 elif info["status"] == "failed" or (
@@ -919,6 +1039,11 @@ async def media_stream(ws: WebSocket):
         "hangup_after_goodbye": False,
         "failed_recovery": False,
         "callback_mode": False,
+        "guest_pass_offered": False,
+        "guest_pass_booked": False,
+        "caller_turns_after_offer": 0,
+        "caller_utterances_after_offer": [],
+        "protect_playback_until": 0,
     }
 
     twilio_q: asyncio.Queue = asyncio.Queue()
@@ -1010,6 +1135,7 @@ async def media_stream(ws: WebSocket):
 
                 await load_agent_context(stream_info)
                 await load_crm_context(stream_info)
+                await open_call_record(stream_info)
 
                 try:
                     await attach_openai()
@@ -1030,6 +1156,9 @@ async def media_stream(ws: WebSocket):
                 )
 
             elif event == "media":
+                recorder = stream_info.get("recorder")
+                if recorder:
+                    recorder.add_inbound(data.get("media") or {})
                 if openai is None or not stream_info.get("greeting_done"):
                     continue
                 await openai.input_audio_buffer.append(
@@ -1053,6 +1182,7 @@ async def media_stream(ws: WebSocket):
         print("❌ MEDIA STREAM ERROR:", repr(e))
 
     finally:
+        await finish_call_record(stream_info)
         await _cancel_task(drain_task)
         await _cancel_task(listener_task)
         await _cancel_task(crm_task)
