@@ -50,6 +50,26 @@ async def _save_phone_call(**kwargs):
         print("📞 Phone call save failed:", repr(exc))
 
 
+async def resolve_studio_for_inbound(*, called_number: str | None = None, fallback_client_id: str | None = None) -> str | None:
+    """Map the Twilio number that received the call to a studio."""
+    if (fallback_client_id or "").strip():
+        return fallback_client_id.strip()
+    phone = (called_number or TWILIO_PHONE_NUMBER or "").strip()
+    if not phone:
+        return (LLC_CLIENT_ID or "").strip() or None
+    try:
+        result = await LlcClient().resolve_studio_by_phone(phone=phone)
+    except Exception as exc:
+        print("📞 Studio lookup failed:", repr(exc))
+        return (LLC_CLIENT_ID or "").strip() or None
+    if result.get("success") and result.get("client_id"):
+        print("📞 Inbound studio:", result.get("title") or result["client_id"], "for", phone)
+        return result["client_id"]
+    if result.get("error"):
+        print("📞 Inbound studio not found for", phone, "—", result.get("error"))
+    return (LLC_CLIENT_ID or "").strip() or None
+
+
 async def _twilio_form_payload(request: Request) -> dict:
     try:
         return dict(await asyncio.wait_for(request.form(), timeout=2.0))
@@ -165,6 +185,7 @@ def _build_stream_twiml(
     client_id=None,
     agent_id=None,
     phone=None,
+    direction=None,
     status_callback=None,
 ) -> str:
     response = VoiceResponse()
@@ -183,10 +204,21 @@ def _build_stream_twiml(
         stream.parameter(name="agent_id", value=agent_id)
     if phone:
         stream.parameter(name="phone", value=phone)
+    if direction:
+        stream.parameter(name="direction", value=direction)
     return str(response)
 
 
-def _twiml_stream_response(*, stream_url: str, member_id=None, client_id=None, agent_id=None, phone=None, status_callback=None) -> Response:
+def _twiml_stream_response(
+    *,
+    stream_url: str,
+    member_id=None,
+    client_id=None,
+    agent_id=None,
+    phone=None,
+    direction=None,
+    status_callback=None,
+) -> Response:
     return Response(
         content=_build_stream_twiml(
             stream_url=stream_url,
@@ -194,6 +226,7 @@ def _twiml_stream_response(*, stream_url: str, member_id=None, client_id=None, a
             client_id=client_id,
             agent_id=agent_id,
             phone=phone,
+            direction=direction,
             status_callback=status_callback,
         ),
         media_type="text/xml",
@@ -210,11 +243,13 @@ async def incoming_call(
 ):
     call_sid = None
     caller_phone = None
+    called_number = None
     try:
         if request.method == "POST":
             form = dict(await asyncio.wait_for(request.form(), timeout=2.0))
             call_sid = form.get("CallSid")
             caller_phone = form.get("From")
+            called_number = form.get("Called") or form.get("To")
     except Exception:
         pass
     print(
@@ -222,6 +257,7 @@ async def incoming_call(
         f"CallSid={call_sid}",
         f"member_id={member_id}",
         f"client_id={client_id}",
+        f"called={called_number}",
         f"phone={phone}",
     )
     try:
@@ -238,7 +274,10 @@ async def incoming_call(
             return Response(content=str(vr), media_type="text/xml")
         if wss_base and wss_base.rstrip("/") != http_base.rstrip("/"):
             print("🎧 Media Stream WSS host:", wss_base, "(HTTP callbacks:", http_base + ")")
-        resolved_client_id = client_id or LLC_CLIENT_ID
+        resolved_client_id = await resolve_studio_for_inbound(
+            called_number=called_number or TWILIO_PHONE_NUMBER,
+            fallback_client_id=client_id,
+        )
         resolved_phone = phone or caller_phone
         if call_sid and resolved_client_id and resolved_phone:
             await _save_phone_call(
@@ -262,6 +301,7 @@ async def incoming_call(
             client_id=resolved_client_id,
             agent_id=agent_id,
             phone=resolved_phone,
+            direction="inbound",
             status_callback=f"{http_base}/stream-status",
         )
     except Exception as exc:
@@ -533,6 +573,7 @@ async def _place_outbound_call(
         client_id=client_id,
         agent_id=agent_id,
         phone=phone,
+        direction="outbound",
         status_callback=f"{http_base}/stream-status",
     )
     print("🎙️ Call audio will be saved from the media stream, not Twilio")

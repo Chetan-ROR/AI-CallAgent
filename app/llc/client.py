@@ -115,6 +115,8 @@ class LlcClient:
         first_name=None,
         last_name=None,
         email=None,
+        call_sid=None,
+        agent_id=None,
     ):
         return await self._request(
             "POST",
@@ -126,7 +128,16 @@ class LlcClient:
                 "first_name": first_name,
                 "last_name": last_name,
                 "email": email,
+                "call_sid": call_sid,
+                "agent_id": agent_id,
             },
+        )
+
+    async def resolve_studio_by_phone(self, *, phone=None):
+        return await self._request(
+            "GET",
+            "/ai/studios/by_phone",
+            params={"phone": phone},
         )
 
     async def open_phone_call(

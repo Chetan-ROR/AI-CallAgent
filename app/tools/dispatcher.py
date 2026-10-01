@@ -3,6 +3,7 @@ import json
 import re
 import time
 
+from app.core.crm_tools import agent_tool_enabled
 from app.llc.client import LlcClient
 
 _AGREE = re.compile(
@@ -122,9 +123,12 @@ async def _book_guest_pass(arguments: dict, stream_info: dict) -> dict:
         first_name=(arguments or {}).get("first_name"),
         last_name=(arguments or {}).get("last_name"),
         email=(arguments or {}).get("email"),
+        call_sid=stream_info.get("call_sid"),
+        agent_id=(stream_info.get("agent") or {}).get("id") or stream_info.get("agent_id"),
     )
     if result.get("success") and result.get("member_id"):
         stream_info["member_id"] = result["member_id"]
+    # Protect confirmation whether they just booked or already had the pass.
     if result.get("success"):
         protect_guest_pass_playback(stream_info)
     return result
@@ -134,14 +138,22 @@ async def dispatch_tool(name: str, arguments: dict, stream_info: dict) -> dict:
     if name == "end_call":
         if not stream_info.get("call_sid"):
             return {"success": False, "error": "Call SID not available"}
+        guest_pass_on = agent_tool_enabled(stream_info.get("agent") or {}, "book_guest_pass", default=False)
+        if guest_pass_on:
+            goodbye = (
+                "Say ONE short goodbye (one or two sentences max): thank them by first name "
+                "if you know it, and say have a good one. Do not mention a trainer consult, "
+                "a follow-up call, another plan, a card, or a price. Do not ask another question."
+            )
+        else:
+            goodbye = (
+                "Say ONE short goodbye (one or two sentences max): thank them by first name "
+                "if you know it, and say have a good one. Do not ask another question."
+            )
         return {
             "success": True,
             "hangup_pending": True,
-            "say_to_user": (
-                "Say ONE short goodbye (one or two sentences max): thank them by first name "
-                "if you know it, say someone from Total Bizz gym will reach out about the "
-                "free trainer consult, and say have a good one. Do not ask another question."
-            ),
+            "say_to_user": goodbye,
         }
 
     if name == "book_guest_pass":

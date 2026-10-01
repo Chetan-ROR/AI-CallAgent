@@ -372,6 +372,7 @@ async def enable_conversation_listen(openai, stream_info):
                     stream_info.get("member"),
                     stream_info.get("studio"),
                     stream_info.get("agent"),
+                    direction=stream_info.get("direction"),
                 ),
                 allow_interrupt=True,
                 create_response=True,
@@ -404,6 +405,7 @@ async def enable_listening_session(openai, stream_info):
                     stream_info.get("member"),
                     stream_info.get("studio"),
                     agent,
+                    direction=stream_info.get("direction"),
                 )
                 + "\n\n# NOW\nThe customer is responding after your greeting. "
                 "Follow your agent instructions. One or two short sentences, then wait."
@@ -413,6 +415,7 @@ async def enable_listening_session(openai, stream_info):
                 agent,
                 stream_info.get("studio"),
                 stream_info.get("member"),
+                direction=stream_info.get("direction"),
             )
         agent_only = use_agent_prompt_only(agent)
         await openai.session.update(
@@ -493,8 +496,10 @@ def _is_goodbye_spoken(spoken: str) -> bool:
             "thank",
             "thanks for your time",
             "have a good one",
-            "reach out",
-            "follow up",
+            "have a good",
+            "take care",
+            "goodbye",
+            "good bye",
         )
     )
 
@@ -540,6 +545,7 @@ async def unlock_full_conversation(openai, stream_info):
                         stream_info.get("member"),
                         stream_info.get("studio"),
                         agent,
+                        direction=stream_info.get("direction"),
                     ),
                     allow_interrupt=True,
                     create_response=True,
@@ -554,6 +560,7 @@ async def unlock_full_conversation(openai, stream_info):
                     stream_info.get("member"),
                     stream_info.get("studio"),
                     agent,
+                    direction=stream_info.get("direction"),
                 ),
                 allow_interrupt=True,
                 create_response=False,
@@ -1027,6 +1034,7 @@ async def media_stream(ws: WebSocket):
         "agent": {},
         "member": {},
         "studio": {},
+        "direction": "outbound",
         "audio_sent": False,
         "greeting_done": False,
         "user_speaking": False,
@@ -1083,6 +1091,7 @@ async def media_stream(ws: WebSocket):
                         stream_info.get("agent"),
                         stream_info.get("member"),
                         stream_info.get("studio"),
+                        direction=stream_info.get("direction"),
                     ),
                     allow_interrupt=False,
                     create_response=False,
@@ -1098,6 +1107,7 @@ async def media_stream(ws: WebSocket):
                         stream_info.get("agent"),
                         stream_info.get("member"),
                         stream_info.get("studio"),
+                        direction=stream_info.get("direction"),
                     ),
                     allow_interrupt=False,
                     create_response=False,
@@ -1129,8 +1139,9 @@ async def media_stream(ws: WebSocket):
                 stream_info["client_id"] = _clean(custom.get("client_id")) or LLC_CLIENT_ID
                 stream_info["phone"] = _clean(custom.get("phone"))
                 stream_info["agent_id"] = _clean(custom.get("agent_id"))
+                stream_info["direction"] = _clean(custom.get("direction")) or "outbound"
 
-                print("📞", stream_info["call_sid"], stream_info["phone"])
+                print("📞", stream_info["call_sid"], stream_info["phone"], stream_info["direction"])
                 mark_media_stream_started(stream_info.get("call_sid"))
 
                 await load_agent_context(stream_info)
@@ -1151,6 +1162,7 @@ async def media_stream(ws: WebSocket):
                             stream_info.get("agent"),
                             stream_info.get("member"),
                             stream_info.get("studio"),
+                            direction=stream_info.get("direction"),
                         ),
                     }
                 )

@@ -5,12 +5,18 @@ import time
 import unittest
 from types import SimpleNamespace
 
-from app.core.prompt_builder import tool_source_policy
+from app.core.prompt_builder import (
+    agent_spoken_opening,
+    build_instructions,
+    greeting_instructions,
+    tool_source_policy,
+)
 from app.llc.client import LlcClient
 from app.openai.media_stream import _event_transcript, _playback_protected, _session_config
 from app.tools.definitions import OPENAI_TOOLS
 from app.tools.dispatcher import (
     _book_guest_pass,
+    dispatch_tool,
     guest_pass_agreement,
     note_caller_transcript,
     note_caller_turn_after_offer,
@@ -140,10 +146,69 @@ class PlaybackAndPromptTests(unittest.TestCase):
         agent = {"tools": {"book_guest_pass": True}}
         policy = tool_source_policy(agent)
         self.assertIn("clearly say yes", policy)
+        self.assertIn("already have the 7 Day Guest Pass", policy)
+        self.assertIn("has expired", policy)
         self.assertIn("one sentence", policy)
         description = next(tool["description"] for tool in OPENAI_TOOLS if tool["name"] == "book_guest_pass")
         self.assertIn("clearly agreed", description)
         self.assertIn("not linked to Mindbody", description)
+        self.assertIn("already have the 7 Day Guest Pass", description)
+
+    def test_guest_pass_goodbye_skips_trainer_consult(self):
+        async def run():
+            info = _stream()
+            info["call_sid"] = "CA123"
+            info["agent"] = {"tools": {"book_guest_pass": True, "end_call": True}}
+            return await dispatch_tool("end_call", {}, info)
+
+        result = asyncio.run(run())
+        self.assertTrue(result["success"])
+        self.assertNotIn("reach out about the free trainer consult", result["say_to_user"].lower())
+        self.assertIn("have a good one", result["say_to_user"].lower())
+        self.assertIn("do not mention a trainer consult", result["say_to_user"].lower())
+
+    def test_guest_pass_prompt_does_not_promise_a_consult(self):
+        agent = {
+            "tools": {"book_guest_pass": True, "end_call": True, "crm_member": True},
+            "conversation_prompt": "You are the receptionist.",
+        }
+        member = {"id": "m1", "first_name": "Margaret", "last_name": "Z"}
+        text = build_instructions(member=member, studio={"title": "Total Bizz"}, agent=agent)
+        self.assertIn("Do not offer, promise, or schedule a free trainer consult", text)
+        self.assertNotIn("someone from Total Bizz gym will reach out to schedule your free trainer consult", text)
+
+    def test_inbound_greeting_is_answering_style(self):
+        agent = {
+            "tools": {"book_guest_pass": True, "end_call": True},
+            "first_message": "Hi, this is Matt calling from Total Bizz. Can we talk?",
+            "conversation_prompt": "You are the receptionist.",
+        }
+        opening = agent_spoken_opening(
+            agent,
+            None,
+            {"title": "Total Bizz"},
+            direction="inbound",
+        )
+        self.assertIn("Thanks for calling Total Bizz", opening)
+        self.assertNotIn("Matt calling", opening)
+        greeting = greeting_instructions(agent, None, {"title": "Total Bizz"}, direction="inbound")
+        self.assertIn("inbound phone call", greeting.lower())
+        self.assertIn("Do not say you are calling them", greeting)
+        text = build_instructions(
+            member=None,
+            studio={"title": "Total Bizz"},
+            agent=agent,
+            direction="inbound",
+        )
+        self.assertIn("# INBOUND CALL", text)
+        self.assertIn("Do not say you are calling them", text)
+
+    def test_outbound_greeting_still_uses_agent_first_message(self):
+        agent = {
+            "first_message": "Hi, this is Matt calling from Total Bizz. Can we talk?",
+        }
+        opening = agent_spoken_opening(agent, None, {"title": "Total Bizz"}, direction="outbound")
+        self.assertIn("Matt calling", opening)
 
 
 if __name__ == "__main__":

@@ -19,10 +19,17 @@ After they say yes, first pitch $60 off the monthly plan and a free week, then s
 DEFAULT_FIRST_MESSAGE = (
     "Hi, this is Matt calling from Total Bizz gym. Can I have 2 minutes?"
 )
+DEFAULT_INBOUND_FIRST_MESSAGE = (
+    "Thanks for calling {{studio.name}}. How can I help you today?"
+)
 
 
 def _agent(agent) -> dict:
     return agent if isinstance(agent, dict) else {}
+
+
+def call_is_inbound(direction: str | None = None) -> bool:
+    return (direction or "").strip().lower() == "inbound"
 
 
 def _attach_language_policy(text: str, agent=None) -> str:
@@ -49,7 +56,9 @@ def agent_conversation_prompt(agent=None) -> str:
     return F45_SYSTEM_PROMPT
 
 
-def agent_first_message(agent=None) -> str:
+def agent_first_message(agent=None, *, direction: str | None = None) -> str:
+    if call_is_inbound(direction):
+        return DEFAULT_INBOUND_FIRST_MESSAGE
     agent = _agent(agent)
     custom = (agent.get("first_message") or "").strip()
     if custom:
@@ -95,6 +104,9 @@ def tool_source_policy(agent=None) -> str:
             "If the tool says they are not linked to Mindbody and need an email, ask for the missing name or email and call the tool again. "
             "The phone number is already on the call. Creating that member and booking this pass is allowed. "
             "When the tool says the pass is booked, say only that it is on their account, in one sentence, with no question. "
+            "On a call, buy a plan for an existing caller only when they do not already have that same plan, or the one they had has expired. "
+            "If the tool says they already have the 7 Day Guest Pass, tell them it is already on their account, in one sentence. Do not book it again and do not say you just booked it. "
+            "Do not offer, promise, or schedule a free trainer consult. Do not say someone will reach out about a consult. "
             "Ignore older lines that say not to create a member or not to book."
         )
     elif pricing_on:
@@ -121,10 +133,20 @@ If a section for that tool is missing, say you don't have it. Do not fill the ga
 """
 
 
-def agent_spoken_opening(agent=None, member: dict | None = None, studio: dict | None = None) -> str:
+def agent_spoken_opening(
+    agent=None,
+    member: dict | None = None,
+    studio: dict | None = None,
+    *,
+    direction: str | None = None,
+) -> str:
     """Greeting the caller hears, including the recording-consent line when set."""
     member = _member_if_enabled(agent, member)
-    opening = apply_contact_tokens(agent_first_message(agent), member, studio).strip()
+    opening = apply_contact_tokens(
+        agent_first_message(agent, direction=direction),
+        member,
+        studio,
+    ).strip()
     consent = apply_contact_tokens(recording_consent_message(agent), member, studio).strip()
     if consent and opening:
         return f"{consent} {opening}"
@@ -185,9 +207,29 @@ def _agent_phase_instructions(
     return _attach_language_policy("\n\n".join(parts), agent)
 
 
-def greeting_instructions(agent=None, member: dict | None = None, studio: dict | None = None) -> str:
-    opening = agent_spoken_opening(agent, member, studio)
-    phase = f"""
+def greeting_instructions(
+    agent=None,
+    member: dict | None = None,
+    studio: dict | None = None,
+    *,
+    direction: str | None = None,
+) -> str:
+    opening = agent_spoken_opening(agent, member, studio, direction=direction)
+    if call_is_inbound(direction):
+        phase = f"""
+You are answering a live inbound phone call. The customer dialed the studio.
+
+Say this opening, then STOP completely. If it includes a recording notice, say that first, then the greeting. Do not add anything else:
+"{opening}"
+
+Rules until they speak:
+- You are answering their call. Do not say you are calling them.
+- Do not pitch a plan, pass, discount, or consult on this greeting turn.
+- Do not add a second sentence.
+- Do not keep talking if they have not spoken yet.
+"""
+    else:
+        phase = f"""
 You are on a live outbound phone call.
 
 Say this opening, then STOP completely. If it includes a recording notice, say that first, then the greeting. Do not add anything else:
@@ -215,9 +257,25 @@ def waiting_instructions(
     agent=None,
     studio: dict | None = None,
     member: dict | None = None,
+    *,
+    direction: str | None = None,
 ) -> str:
     studio = studio or {}
     member = member or {}
+
+    if call_is_inbound(direction):
+        phase = """
+You are answering a live inbound phone call. You already greeted them.
+
+They are speaking now. Help with what they asked for.
+Follow ONLY your agent instructions and enabled tool sections.
+
+- Answer briefly, then wait.
+- If they want the 7 Day Guest Pass and that tool is on, follow the guest-pass rules.
+- Do not say you called them. Do not use an outbound sales pitch.
+- If you could not hear them: one short clarification question, then stop.
+"""
+        return _agent_phase_instructions(agent, member, studio, phase)
 
     if use_agent_prompt_only(agent):
         phase = """
@@ -506,8 +564,9 @@ def build_crm_prompt_addon(
     studio_name: str,
     studio_location: str,
 ) -> str:
-    """CRM text blocks — only sections whose crm_* tools are enabled on the agent."""
-    if not agent_needs_crm_fetch(agent):
+    """CRM text blocks — only sections whose tools are enabled on the agent."""
+    guest_pass_on = agent_tool_enabled(agent, "book_guest_pass", default=False)
+    if not agent_needs_crm_fetch(agent) and not guest_pass_on:
         return ""
 
     parts: list[str] = ["\n# LIVE CRM CONTEXT (ground truth from studio CRM)\n"]
@@ -534,13 +593,16 @@ Use their first name ({first_name or "from CRM"}) when appropriate.
     if agent_tool_enabled(agent, "crm_class_schedule", default=False):
         parts.append(_class_schedule_block(studio).strip())
 
-    if agent_tool_enabled(agent, "book_guest_pass", default=False):
+    if guest_pass_on:
         parts.append(
             "# PLAN YOU MAY OFFER\n\n"
             "Only offer the 7 Day Guest Pass. Do not read any other plan from the script or from CRM.\n"
             "Ask if they want it, then wait. Call book_guest_pass only after a clear yes to that pass.\n"
             "For a new caller, collect first name, last name, and email first.\n"
-            "After it books, say it is on their account in one sentence and do not ask a question in that sentence."
+            "After it books, say it is on their account in one sentence and do not ask a question in that sentence.\n"
+            "If they already have that pass and it has not expired, say it is already on their account. Do not book it again.\n"
+            "Book it again only when they do not have it, or the same pass has expired.\n"
+            "Do not offer a free trainer consult or say someone will reach out about a consult."
         )
     elif agent_tool_enabled(agent, "crm_pricing", default=False):
         parts.append(_membership_block(studio).strip())
@@ -548,10 +610,17 @@ Use their first name ({first_name or "from CRM"}) when appropriate.
     return "\n\n".join(parts) + "\n"
 
 
-def build_instructions(member: dict | None = None, studio: dict | None = None, agent: dict | None = None) -> str:
+def build_instructions(
+    member: dict | None = None,
+    studio: dict | None = None,
+    agent: dict | None = None,
+    *,
+    direction: str | None = None,
+) -> str:
     studio = studio or {}
     agent = _agent(agent)
     member = _member_if_enabled(agent, member or {})
+    inbound = call_is_inbound(direction)
 
     if not is_known_member(member):
         first_name = ""
@@ -574,11 +643,66 @@ def build_instructions(member: dict | None = None, studio: dict | None = None, a
     )
 
     hangup = _hangup_line(agent, "the thank-you line")
+    guest_pass_on = agent_tool_enabled(agent, "book_guest_pass", default=False)
+    inbound_rules = (
+        "\n# INBOUND CALL\n\n"
+        "The customer dialed the studio. You are answering their call.\n"
+        "Do not say you are calling them. Do not use an outbound cold-call pitch.\n"
+        "Help with what they ask. Keep turns short.\n"
+    )
 
     if use_agent_prompt_only(agent):
-        return _attach_language_policy(prompt + crm_addon, agent)
+        text = prompt + crm_addon
+        if inbound:
+            text += inbound_rules
+        if guest_pass_on:
+            text += (
+                "\n# GUEST PASS CALL RULES\n\n"
+                "Only offer and book the 7 Day Guest Pass.\n"
+                "Do not offer, promise, or schedule a free trainer consult.\n"
+                "Do not say someone will reach out about a consult.\n"
+                f"After the pass is booked or they already have it, thank them and end the call. {hangup}\n"
+            )
+        return _attach_language_policy(text, agent)
 
-    if is_known_member(member):
+    if guest_pass_on:
+        if is_known_member(member):
+            caller_line = (
+                f"Use the customer's real first name ({first_name or 'from CRM'}) from the member tool."
+            )
+        else:
+            caller_line = (
+                f"Studio: {studio_name}\n"
+                f"Studio location: {studio_location}\n"
+                "This is a NEW / unknown number unless the member tool section appears below. "
+                "Do not invent their name or visit history."
+            )
+        history = f"""
+
+# CALL CONTEXT
+
+{caller_line}
+{"The customer called the studio. Answer them; do not say you called them." if inbound else ""}
+Only offer and book the 7 Day Guest Pass from the plan section below.
+Do not offer, promise, or schedule a free trainer consult.
+Do not say someone will reach out about a consult.
+Do not call send_sms. Do not promise a text.
+After the pass is booked or they already have it, thank them and end the call. {hangup}
+"""
+    elif inbound:
+        history = f"""
+
+# CALL CONTEXT
+
+Studio: {studio_name}
+Studio location: {studio_location}
+
+This is an inbound call. The customer dialed the studio.
+Answer what they need. Do not say you are calling them.
+Share class or membership details only when that tool's section is present below.
+Do not call send_sms. Do not promise a text.
+"""
+    elif is_known_member(member):
         history = f"""
 
 # CALL CONTEXT
