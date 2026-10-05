@@ -1,5 +1,6 @@
 import asyncio
 import json
+import uuid
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -23,23 +24,58 @@ class LlcClient:
     def _client_id(self, client_id=None):
         return client_id or LLC_CLIENT_ID
 
-    def _sync_request(self, method: str, path: str, params=None, json_body=None):
+    def _sync_request(
+        self,
+        method: str,
+        path: str,
+        params=None,
+        json_body=None,
+        form_fields=None,
+        file_field=None,
+        timeout=25,
+    ):
         url = f"{self.base_url}{path}"
         if params:
             filtered = {key: value for key, value in params.items() if value not in (None, "")}
             if filtered:
                 url = f"{url}?{urlencode(filtered, doseq=True)}"
 
+        headers = dict(self.headers)
         body = None
-        if json_body is not None:
+        if file_field is not None:
+            boundary = f"----llc{uuid.uuid4().hex}"
+            chunks = []
+            for key, value in (form_fields or {}).items():
+                if value in (None, ""):
+                    continue
+                chunks.append(f"--{boundary}\r\n".encode())
+                chunks.append(
+                    f'Content-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n'.encode()
+                )
+            filename = file_field.get("filename") or "recording.wav"
+            content_type = file_field.get("content_type") or "audio/wav"
+            chunks.append(f"--{boundary}\r\n".encode())
+            chunks.append(
+                (
+                    f'Content-Disposition: form-data; name="{file_field["name"]}"; '
+                    f'filename="{filename}"\r\n'
+                    f"Content-Type: {content_type}\r\n\r\n"
+                ).encode()
+            )
+            chunks.append(file_field["content"])
+            chunks.append(b"\r\n")
+            chunks.append(f"--{boundary}--\r\n".encode())
+            body = b"".join(chunks)
+            headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
+        elif json_body is not None:
             body = json.dumps(json_body).encode("utf-8")
 
         request = Request(url, data=body, method=method)
-        for key, value in self.headers.items():
+        for key, value in headers.items():
             request.add_header(key, value)
 
         try:
-            with urlopen(request, timeout=25) as response:
+            with urlopen(request, timeout=timeout) as response:
                 raw = response.read().decode("utf-8")
                 status = response.status
         except HTTPError as exc:
@@ -67,7 +103,16 @@ class LlcClient:
 
         return data
 
-    async def _request(self, method: str, path: str, params=None, json_body=None):
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        params=None,
+        json_body=None,
+        form_fields=None,
+        file_field=None,
+        timeout=25,
+    ):
         if not self.enabled:
             return {
                 "success": False,
@@ -80,6 +125,9 @@ class LlcClient:
             path,
             params,
             json_body,
+            form_fields,
+            file_field,
+            timeout,
         )
 
     async def lookup_member(self, *, client_id=None, member_id=None):
@@ -196,20 +244,34 @@ class LlcClient:
         call_sid=None,
         recording_status=None,
         storage=None,
-        recording_key=None,
         duration_seconds=None,
+        audio_bytes=None,
+        filename=None,
     ):
+        fields = {
+            "client_id": self._client_id(client_id),
+            "call_sid": call_sid,
+            "recording_status": recording_status,
+            "storage": storage,
+            "duration_seconds": duration_seconds,
+        }
+        if audio_bytes:
+            return await self._request(
+                "PATCH",
+                "/ai/phone_calls",
+                form_fields=fields,
+                file_field={
+                    "name": "audio",
+                    "filename": filename or f"{call_sid}.wav",
+                    "content_type": "audio/wav",
+                    "content": audio_bytes,
+                },
+                timeout=60,
+            )
         return await self._request(
             "PATCH",
             "/ai/phone_calls",
-            json_body={
-                "client_id": self._client_id(client_id),
-                "call_sid": call_sid,
-                "recording_status": recording_status,
-                "storage": storage,
-                "recording_key": recording_key,
-                "duration_seconds": duration_seconds,
-            },
+            json_body={key: value for key, value in fields.items() if value not in (None, "")},
         )
 
 

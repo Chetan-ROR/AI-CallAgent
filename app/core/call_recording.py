@@ -1,7 +1,8 @@
-"""Save Twilio media-stream audio on this system, or in S3 when a bucket is set.
+"""Mix Twilio media-stream audio in memory, then hand the WAV to LLC (Rails).
 
 Inbound caller audio and outbound agent audio are both mulaw 8 kHz from the
 media stream. They are mixed into one stereo WAV (caller left, agent right).
+Nothing is written to disk in gym-ai-poc — Rails stores the file.
 """
 
 from __future__ import annotations
@@ -11,15 +12,7 @@ import base64
 import io
 import threading
 import time
-import uuid
 import wave
-from pathlib import Path
-
-from app.core.config import (
-    RECORDING_LOCAL_DIR,
-    RECORDING_S3_BUCKET,
-    RECORDING_S3_PREFIX,
-)
 
 _SAMPLE_RATE = 8000
 _SILENCE = 0xFF
@@ -174,41 +167,13 @@ class CallRecorder:
         if not wav:
             print("🎙️ No media-stream audio to save", self.call_sid)
             return None
-        if RECORDING_S3_BUCKET:
-            key = _upload_s3(self.call_sid, self.client_id, wav)
-            return {"storage": "s3", "recording_key": key}
-        path = _write_local(self.call_sid, self.client_id, wav)
-        return {"storage": "local", "recording_key": path}
+        filename = f"{self.call_sid}.wav"
+        print("🎙️ Recording ready to upload to LLC", filename, f"({len(wav)} bytes)")
+        return {
+            "storage": "local",
+            "recording_bytes": wav,
+            "filename": filename,
+        }
 
     def duration_seconds(self) -> int:
         return max(0, int(time.monotonic() - self._t0))
-
-
-def _write_local(call_sid: str, client_id: str, wav: bytes) -> str:
-    folder = Path(RECORDING_LOCAL_DIR)
-    if client_id:
-        folder = folder / client_id
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{call_sid}.wav"
-    path.write_bytes(wav)
-    print("🎙️ Recording saved", path)
-    return str(path)
-
-
-def _upload_s3(call_sid: str, client_id: str, wav: bytes) -> str:
-    import boto3
-
-    prefix = RECORDING_S3_PREFIX
-    if client_id:
-        key = f"{prefix}/{client_id}/{call_sid}.wav"
-    else:
-        key = f"{prefix}/{call_sid}.wav"
-    boto3.client("s3").put_object(
-        Bucket=RECORDING_S3_BUCKET,
-        Key=key,
-        Body=wav,
-        ContentType="audio/wav",
-    )
-    uri = f"s3://{RECORDING_S3_BUCKET}/{key}"
-    print("🎙️ Recording saved", uri)
-    return uri

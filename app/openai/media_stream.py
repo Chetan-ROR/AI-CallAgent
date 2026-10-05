@@ -237,10 +237,17 @@ async def finish_call_record(stream_info: dict) -> None:
             call_sid=call_sid,
             recording_status=status,
             storage=(saved or {}).get("storage"),
-            recording_key=(saved or {}).get("recording_key"),
             duration_seconds=duration,
+            audio_bytes=(saved or {}).get("recording_bytes"),
+            filename=(saved or {}).get("filename"),
         )
-        print("🎙️ Call record finished:", status, result.get("error") or (saved or {}).get("recording_key") or "")
+        print(
+            "🎙️ Call record finished:",
+            status,
+            result.get("error")
+            or (result.get("phone_call") or {}).get("recording_key")
+            or "",
+        )
     except Exception as exc:
         print("🎙️ Call record complete failed:", repr(exc))
 
