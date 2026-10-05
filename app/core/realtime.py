@@ -11,7 +11,48 @@ from app.core.compliance import allows_call_transcript
 from app.core.crm_tools import agent_tool_enabled, end_call_enabled
 from app.tools.definitions import OPENAI_TOOLS
 
-AGENT_LANGUAGES: dict[str, str] = {"en": "English", "hi": "Hindi"}
+AGENT_LANGUAGES: dict[str, str] = {
+    "en": "English",
+    "hi": "Hindi",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "pt": "Portuguese",
+    "it": "Italian",
+    "nl": "Dutch",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "zh": "Chinese (Mandarin)",
+    "ar": "Arabic",
+    "tr": "Turkish",
+    "pl": "Polish",
+    "ru": "Russian",
+    "vi": "Vietnamese",
+    "th": "Thai",
+    "id": "Indonesian",
+    "bn": "Bengali",
+    "ta": "Tamil",
+    "te": "Telugu",
+    "mr": "Marathi",
+    "gu": "Gujarati",
+    "kn": "Kannada",
+    "ml": "Malayalam",
+    "pa": "Punjabi",
+    "ur": "Urdu",
+    "sv": "Swedish",
+    "no": "Norwegian",
+    "da": "Danish",
+    "fi": "Finnish",
+    "he": "Hebrew",
+    "fil": "Filipino",
+    "uk": "Ukrainian",
+    "cs": "Czech",
+    "ro": "Romanian",
+    "hu": "Hungarian",
+    "el": "Greek",
+    "ms": "Malay",
+    "sw": "Swahili",
+}
 
 # All built-in voices for gpt-realtime (OpenAI Realtime API).
 # OpenAI does not publish official gender labels; "character" is informal guidance only.
@@ -80,24 +121,6 @@ REALTIME_VOICE_CATALOG: tuple[dict[str, str | bool], ...] = (
     },
 )
 
-# Hints for Speech API previews (Realtime calls use the raw voice preset only).
-VOICE_PREVIEW_INSTRUCTIONS: dict[str, str] = {
-    "echo": (
-        "Adult male voice. Natural, conversational, calm and clear. Medium pace, not theatrical."
-    ),
-    "cedar": (
-        "Adult male voice. Warm, professional receptionist tone. Steady pace, friendly but not bubbly."
-    ),
-    "ash": "Neutral voice with a slightly lower register. Clear and professional.",
-    "sage": "Neutral, calm, measured pace. Gender-neutral professional tone.",
-    "verse": "Neutral, energetic but not high-pitched. Clear diction.",
-    "alloy": "Neutral professional tone. Balanced pitch, not overly bright.",
-    "marin": "Natural feminine voice. Warm and expressive, conversational.",
-    "ballad": "Feminine voice. Smooth and melodic, calm pace.",
-    "coral": "Feminine voice. Friendly and bright, natural pace.",
-    "shimmer": "Feminine voice. Light and upbeat, clear articulation.",
-}
-
 VALID_VOICES = frozenset(str(v["id"]) for v in REALTIME_VOICE_CATALOG)
 
 REALTIME_MODEL = DEFAULT_REALTIME_MODEL
@@ -146,16 +169,16 @@ def resolve_agent_language(agent: dict | None, *, default: str = "en") -> str:
 def agent_language_instructions(agent: dict | None) -> str:
     code = resolve_agent_language(agent)
     name = AGENT_LANGUAGES.get(code, "English")
-    other_labels = [label for lang, label in AGENT_LANGUAGES.items() if lang != code]
-    others = ", ".join(other_labels) if other_labels else "other languages"
     return f"""
-# AGENT LANGUAGE (MANDATORY)
+# AGENT LANGUAGE (HIGHEST PRIORITY — OVERRIDES SCRIPT, TONE, AND CALLER LANGUAGE)
 
-This agent is configured for {name} ({code}) only.
-Speak and reply ONLY in {name} on every turn (greeting, answers, goodbye).
-If the customer uses {others}, asks to switch language, or mixes languages, stay in {name}.
-Do not mirror their language choice. Brief acknowledgment in {name} is OK; content must remain {name} only.
-Do not use full sentences in a language other than {name}.
+Configured language: {name} ({code}) only.
+Every spoken sentence you produce MUST be in {name} — greeting, answers, confirmations, goodbye.
+Never switch to Hindi, English, or any other language because the caller used it.
+If the caller speaks Hindi / English / mixed, still answer only in {name}.
+Do not translate your reply into their language. Do not mirror their language.
+Ignore any script line that says "USA Midwestern", "speak English", or similar when it conflicts with {name}.
+If your first_message / script is written in another language, rephrase that content into {name} before speaking.
 """
 
 
@@ -163,20 +186,52 @@ def resolve_agent_voice(
     agent: dict | None,
     *,
     override: str | None = None,
-    fallback: str = "alloy",
+    fallback: str | None = None,
 ) -> str:
-    fb = (fallback or "alloy").strip().lower()
+    fb = (fallback or DEFAULT_VOICE).strip().lower()
     if fb not in VALID_VOICES:
-        fb = "alloy"
+        fb = DEFAULT_VOICE if DEFAULT_VOICE in VALID_VOICES else "marin"
+    over = (override or "").strip().lower()
+    if over in VALID_VOICES:
+        return over
     voice_settings = (agent or {}).get("voice_settings") or {}
     if isinstance(voice_settings, dict):
         from_agent = str(voice_settings.get("voice") or "").strip().lower()
         if from_agent in VALID_VOICES:
             return from_agent
-    over = (override or "").strip().lower()
-    if over in VALID_VOICES:
-        return over
     return fb
+
+
+def _voice_settings(agent: dict | None) -> dict:
+    raw = (agent or {}).get("voice_settings") or {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def is_elevenlabs_voice_id(voice_id: str | None) -> bool:
+    """ElevenLabs voice ids are long mixed-case tokens, not OpenAI presets."""
+    value = str(voice_id or "").strip()
+    if not value or value.lower() in VALID_VOICES:
+        return False
+    return len(value) >= 16
+
+
+def uses_elevenlabs_voice(agent: dict | None) -> bool:
+    settings = _voice_settings(agent)
+    provider = str(settings.get("provider") or "").strip().lower()
+    voice = str(settings.get("voice") or "").strip()
+    if provider == "elevenlabs":
+        return bool(voice)
+    if provider in ("openai", "realtime"):
+        return False
+    return is_elevenlabs_voice_id(voice)
+
+
+def resolve_elevenlabs_voice_id(agent: dict | None) -> str | None:
+    settings = _voice_settings(agent)
+    voice = str(settings.get("voice") or "").strip()
+    if not voice or voice.lower() in VALID_VOICES:
+        return None
+    return voice
 
 
 def resolve_agent_model(
@@ -185,17 +240,48 @@ def resolve_agent_model(
     override: str | None = None,
     fallback: str | None = None,
 ) -> str:
+    from app.core.openai_chat_models import (
+        is_v2_live_model_id,
+        resolve_v2_realtime_model_id,
+    )
+
     fb = (fallback or REALTIME_MODEL).strip()
     voice_settings = (agent or {}).get("voice_settings") or {}
     from_agent = ""
     if isinstance(voice_settings, dict):
         from_agent = str(voice_settings.get("model") or "").strip()
     over = (override or "").strip()
+    for candidate in (over, from_agent):
+        if is_v2_live_model_id(candidate):
+            return resolve_v2_realtime_model_id(candidate)
     if over:
         return resolve_realtime_model_id(over, fallback=fb)
     if from_agent:
         return resolve_realtime_model_id(from_agent, fallback=fb)
     return resolve_realtime_model_id(fb, fallback=REALTIME_MODEL)
+
+
+# Chat Completions models live in openai_chat_models.py (single source for UI + resolve_chat_model).
+
+
+def resolve_chat_model(
+    agent: dict | None,
+    *,
+    override: str | None = None,
+    fallback: str | None = None,
+) -> str:
+    from app.core.config import OPENAI_CHAT_MODEL
+    from app.core.openai_chat_models import resolve_chat_model_id
+
+    fb = (fallback or OPENAI_CHAT_MODEL or "gpt-4.1").strip()
+    settings = _voice_settings(agent)
+    from_agent = str(settings.get("model") or "").strip()
+    over = (override or "").strip()
+    for candidate in (over, from_agent, fb):
+        if not candidate or "realtime" in candidate.lower() or candidate.startswith("gpt-live-1"):
+            continue
+        return resolve_chat_model_id(candidate, fallback=fb)
+    return resolve_chat_model_id(fb, fallback="gpt-4.1")
 
 
 def agent_allow_interrupt(agent: dict | None, *, default: bool = True) -> bool:
@@ -266,7 +352,8 @@ def build_realtime_session(
     agent: Optional[dict] = None,
 ) -> dict[str, Any]:
     composed = compose_instructions(instructions, first_message, mode)
-    if agent and "AGENT LANGUAGE (MANDATORY)" not in composed:
+    # build_instructions already attaches language; only add if missing.
+    if agent and "# AGENT LANGUAGE" not in composed:
         composed = f"{composed.rstrip()}\n\n{agent_language_instructions(agent).strip()}\n"
     chosen_voice = resolve_agent_voice(
         agent,

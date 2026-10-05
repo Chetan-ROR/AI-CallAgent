@@ -17,12 +17,20 @@ from app.core.crm_tools import agent_needs_crm_fetch, agent_tool_enabled
 from app.core.compliance import allows_audio_recording
 from app.core.call_recording import CallRecorder
 from app.core.realtime import (
+    DEFAULT_VOICE,
     REALTIME_MODEL,
+    resolve_agent_language,
     resolve_agent_model,
     resolve_agent_tools,
     resolve_agent_voice,
+    resolve_elevenlabs_voice_id,
     turn_detection_for_agent,
+    uses_elevenlabs_voice,
 )
+from app.core.openai_chat_models import agent_uses_v2_live
+from app.elevenlabs.client import iter_tts_ulaw_chunks
+from app.openai.pipeline import PipelineSession
+from app.openai.tts import iter_openai_tts_ulaw_chunks
 from app.tools.dispatcher import (
     dispatch_tool,
     note_caller_transcript,
@@ -93,18 +101,19 @@ def _session_config(
     tools_enabled: bool = True,
     stream_info: dict | None = None,
 ):
+    """OpenAI Realtime session (audio in/out). ElevenLabs agents use PipelineSession instead."""
     agent = (stream_info or {}).get("agent") or {}
-    voice_name = resolve_agent_voice(agent, fallback="alloy")
     turn_detection = turn_detection_for_agent(
         agent,
         create_response=create_response,
     )
-    if not agent and not allow_interrupt:
+    # Greeting phase always passes allow_interrupt=False — honor it even with agent loaded.
+    if not allow_interrupt:
         turn_detection["interrupt_response"] = False
-        turn_detection["threshold"] = 0.9
+        turn_detection["threshold"] = max(float(turn_detection.get("threshold") or 0.65), 0.9)
     elif not agent:
-        turn_detection["interrupt_response"] = allow_interrupt
-        turn_detection["threshold"] = 0.65 if allow_interrupt else 0.9
+        turn_detection["interrupt_response"] = True
+        turn_detection["threshold"] = 0.65
 
     tools = _agent_tools(stream_info, tools_enabled=tools_enabled)
 
@@ -114,23 +123,18 @@ def _session_config(
         "tools": tools,
         "tool_choice": "auto" if tools_enabled and tools else "none",
         "output_modalities": ["audio"],
-        # Realtime audio turns need headroom; 380 caused empty incomplete responses after barge-in.
         "max_output_tokens": 1024 if not tools_enabled else 1200,
         "audio": {
             "input": {
-                "format": {
-                    "type": "audio/pcmu"
-                },
+                "format": {"type": "audio/pcmu"},
                 "turn_detection": turn_detection,
                 "transcription": {"model": "gpt-4o-transcribe"},
             },
             "output": {
-                "format": {
-                    "type": "audio/pcmu"
-                },
-                "voice": voice_name,
-            }
-        }
+                "format": {"type": "audio/pcmu"},
+                "voice": resolve_agent_voice(agent, fallback=DEFAULT_VOICE),
+            },
+        },
     }
 
 
@@ -277,6 +281,97 @@ async def _cancel_task(task):
         pass
 
 
+async def _cancel_pipeline_tts(stream_info: dict):
+    stream_info["tts_cancel"] = True
+    task = stream_info.pop("tts_task", None)
+    await _cancel_task(task)
+    stream_info["tts_cancel"] = False
+
+
+async def _send_ulaw_payload(ws, stream_info: dict, payload: str) -> None:
+    stream_info["audio_sent"] = True
+    recorder = stream_info.get("recorder")
+    if recorder:
+        recorder.add_outbound(payload)
+    sid = stream_info.get("sid")
+    if sid:
+        await ws.send_json(
+            {
+                "event": "media",
+                "streamSid": sid,
+                "media": {"payload": payload},
+            }
+        )
+
+
+async def speak_with_elevenlabs(ws, stream_info: dict, text: str) -> bool:
+    """Speak agent text via ElevenLabs μ-law stream into Twilio."""
+    spoken = (text or "").strip()
+    if not spoken:
+        return False
+    voice_id = resolve_elevenlabs_voice_id(stream_info.get("agent") or {})
+    if not voice_id:
+        print("⚠️ ElevenLabs voice id missing on agent — skip TTS")
+        return False
+
+    stream_info["tts_cancel"] = False
+    stream_info["tts_playing"] = True
+    print("🗣️ ElevenLabs TTS:", voice_id, f"({len(spoken)} chars)")
+    sent = False
+    try:
+        async for payload in iter_tts_ulaw_chunks(
+            voice_id=voice_id,
+            text=spoken,
+            language_code=resolve_agent_language(stream_info.get("agent") or {}),
+            should_cancel=lambda: bool(stream_info.get("tts_cancel")),
+        ):
+            if stream_info.get("tts_cancel"):
+                break
+            sent = True
+            await _send_ulaw_payload(ws, stream_info, payload)
+    except Exception as exc:
+        print("❌ ElevenLabs TTS failed:", repr(exc))
+        return False
+    finally:
+        stream_info["tts_playing"] = False
+    return sent
+
+
+async def speak_with_openai_tts(ws, stream_info: dict, text: str) -> bool:
+    """Speak agent text via OpenAI Speech API → μ-law into Twilio."""
+    spoken = (text or "").strip()
+    if not spoken:
+        return False
+    voice = resolve_agent_voice(stream_info.get("agent") or {}, fallback=DEFAULT_VOICE)
+    stream_info["tts_cancel"] = False
+    stream_info["tts_playing"] = True
+    print("🗣️ OpenAI TTS:", voice, f"({len(spoken)} chars)")
+    sent = False
+    try:
+        async for payload in iter_openai_tts_ulaw_chunks(
+            voice=voice,
+            text=spoken,
+            should_cancel=lambda: bool(stream_info.get("tts_cancel")),
+        ):
+            if stream_info.get("tts_cancel"):
+                break
+            sent = True
+            await _send_ulaw_payload(ws, stream_info, payload)
+    except Exception as exc:
+        print("❌ OpenAI TTS failed:", repr(exc))
+        return False
+    finally:
+        stream_info["tts_playing"] = False
+    return sent
+
+
+async def speak_pipeline(ws, stream_info: dict, text: str) -> bool:
+    """Single phone TTS entry: ElevenLabs or OpenAI Speech by agent voice."""
+    if uses_elevenlabs_voice(stream_info.get("agent") or {}):
+        return await speak_with_elevenlabs(ws, stream_info, text)
+    return await speak_with_openai_tts(ws, stream_info, text)
+
+
 async def load_crm_context(stream_info: dict, *, force: bool = False):
     agent = stream_info.get("agent") or {}
     if not agent_needs_crm_fetch(agent):
@@ -361,14 +456,6 @@ async def load_agent_context(stream_info: dict):
             print("📝 Using LLC agent first_message for greeting")
     else:
         stream_info["agent"] = stream_info.get("agent") or {}
-
-
-async def refresh_crm_instructions(openai, stream_info):
-    try:
-        await load_crm_context(stream_info)
-        print("👤 CRM lookup finished, waiting for them to answer before pitching")
-    except Exception as exc:
-        print("❌ CRM context update failed:", repr(exc))
 
 
 async def enable_conversation_listen(openai, stream_info):
@@ -654,7 +741,6 @@ async def receive_from_openai(live, ws, stream_info):
                 note_caller_transcript(stream_info, _event_transcript(event))
 
             elif event_type == "response.output_audio.delta":
-
                 stream_info["audio_sent"] = True
                 recorder = stream_info.get("recorder")
                 if recorder and getattr(event, "delta", None):
@@ -671,9 +757,13 @@ async def receive_from_openai(live, ws, stream_info):
                         }
                     )
 
-            elif event_type == "response.output_audio_transcript.delta":
+            elif event_type in (
+                "response.output_audio_transcript.delta",
+                "response.output_text.delta",
+                "response.text.delta",
+            ):
 
-                transcript.append(event.delta)
+                transcript.append(getattr(event, "delta", None) or "")
 
             elif event_type == "response.function_call_arguments.delta":
 
@@ -759,7 +849,7 @@ async def receive_from_openai(live, ws, stream_info):
                             )
                         except Exception as exc:
                             print("⚠️ failed-turn recovery:", repr(exc))
-                else:
+                elif not spoken:
                     print("⚠️ Empty AI turn (no speech)")
 
                 if stream_info.get("hangup_after_goodbye") and info["status"] in (
@@ -1065,7 +1155,7 @@ async def media_stream(ws: WebSocket):
     live = None
     openai = None
     listener_task = None
-    crm_task = None
+    pipeline: PipelineSession | None = None
 
     async def drain_twilio():
         try:
@@ -1119,6 +1209,7 @@ async def media_stream(ws: WebSocket):
                     allow_interrupt=False,
                     create_response=False,
                     tools_enabled=False,
+                    stream_info=stream_info,
                 )
             )
         print("✅ OpenAI Session Ready")
@@ -1155,34 +1246,55 @@ async def media_stream(ws: WebSocket):
                 await load_crm_context(stream_info)
                 await open_call_record(stream_info)
 
-                try:
-                    await attach_openai()
-                except Exception as exc:
-                    print("❌ OPENAI REALTIME CONNECT FAILED:", repr(exc))
-                    break
-
-                print("🤖 Starting greeting")
-                await openai.response.create(
-                    response={
-                        "output_modalities": ["audio"],
-                        "instructions": greeting_instructions(
-                            stream_info.get("agent"),
-                            stream_info.get("member"),
-                            stream_info.get("studio"),
-                            direction=stream_info.get("direction"),
-                        ),
-                    }
-                )
+                agent = stream_info.get("agent") or {}
+                if agent_uses_v2_live(agent):
+                    print("🎧 V2 Live — OpenAI Realtime (hears + speaks directly)")
+                    try:
+                        await attach_openai()
+                    except Exception as exc:
+                        print("❌ OPENAI REALTIME CONNECT FAILED:", repr(exc))
+                        break
+                    stream_info["openai"] = openai
+                    await openai.response.create(
+                        response={
+                            "output_modalities": ["audio"],
+                            "instructions": greeting_instructions(
+                                stream_info.get("agent"),
+                                stream_info.get("member"),
+                                stream_info.get("studio"),
+                                direction=stream_info.get("direction"),
+                            ),
+                        }
+                    )
+                else:
+                    tts = "ElevenLabs" if uses_elevenlabs_voice(agent) else "OpenAI Speech"
+                    print(f"🎧 V1 pipeline (STT + Chat + {tts})")
+                    pipeline = PipelineSession(
+                        ws=ws,
+                        stream_info=stream_info,
+                        speak=speak_pipeline,
+                        cancel_tts=_cancel_pipeline_tts,
+                        twilio_clear=_twilio_clear,
+                        playback_protected=_playback_protected,
+                        goodbye_delay=_goodbye_playback_delay,
+                        is_goodbye=_is_goodbye_spoken,
+                    )
+                    await pipeline.start_greeting()
 
             elif event == "media":
                 recorder = stream_info.get("recorder")
                 if recorder:
                     recorder.add_inbound(data.get("media") or {})
+                media = data.get("media") or {}
+                payload = media.get("payload")
+                if pipeline is not None:
+                    if payload:
+                        await pipeline.on_media_payload(payload)
+                    continue
                 if openai is None or not stream_info.get("greeting_done"):
                     continue
-                await openai.input_audio_buffer.append(
-                    audio=data["media"]["payload"]
-                )
+                if payload:
+                    await openai.input_audio_buffer.append(audio=payload)
 
             elif event == "stop":
                 print(
@@ -1204,7 +1316,6 @@ async def media_stream(ws: WebSocket):
         await finish_call_record(stream_info)
         await _cancel_task(drain_task)
         await _cancel_task(listener_task)
-        await _cancel_task(crm_task)
         if live is not None:
             await live.close()
         prepare_openai_connection()

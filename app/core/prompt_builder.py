@@ -34,8 +34,11 @@ def call_is_inbound(direction: str | None = None) -> bool:
 
 def _attach_language_policy(text: str, agent=None) -> str:
     block = agent_language_instructions(agent).strip()
-    if block and block not in (text or ""):
-        text = f"{(text or '').rstrip()}\n\n{block}\n"
+    # Put language first and last so it wins over a long English script.
+    if block:
+        body = (text or "").rstrip()
+        if block not in body:
+            text = f"{block}\n\n{body}\n\n{block}\n"
     policy = tool_source_policy(agent).strip()
     if policy and policy not in (text or ""):
         text = f"{(text or '').rstrip()}\n\n{policy}\n"
@@ -57,12 +60,12 @@ def agent_conversation_prompt(agent=None) -> str:
 
 
 def agent_first_message(agent=None, *, direction: str | None = None) -> str:
-    if call_is_inbound(direction):
-        return DEFAULT_INBOUND_FIRST_MESSAGE
     agent = _agent(agent)
     custom = (agent.get("first_message") or "").strip()
     if custom:
         return custom
+    if call_is_inbound(direction):
+        return DEFAULT_INBOUND_FIRST_MESSAGE
     return DEFAULT_FIRST_MESSAGE
 
 

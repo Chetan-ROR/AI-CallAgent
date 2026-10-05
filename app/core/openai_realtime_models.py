@@ -74,6 +74,8 @@ _CACHE_MAX_AGE_SEC = 0.0  # refresh from OpenAI on every catalog read
 
 def _speech_realtime_model_id(model_id: str) -> bool:
     mid = (model_id or "").strip().lower()
+    if mid == "gpt-live-1" or mid.startswith("gpt-live-1"):
+        return "transcribe" not in mid
     if "realtime" not in mid:
         return False
     return not any(token in mid for token in _REALTIME_ID_BLOCKLIST)

@@ -28,6 +28,7 @@ from app.core.public_webhook import (
 )
 from app.twilio.twilio_client import twilio_client as client
 from app.llc.client import LlcClient, save_agent_prefetch, save_crm_prefetch
+from app.core.openai_chat_models import agent_uses_v2_live
 from app.openai.media_stream import (
     ensure_openai_ready,
     prepare_openai_connection,
@@ -292,7 +293,6 @@ async def incoming_call(
         elif call_sid and not resolved_client_id:
             print("📥 Inbound call not saved — Twilio number is not tied to a studio")
 
-        prepare_openai_connection()
         mark_public_webhook_ok(http_base)
         print("🎧 TwiML stream:", stream_url)
         return _twiml_stream_response(
@@ -388,6 +388,11 @@ async def make_call(payload: MakeCallRequest | None = Body(default=None)):
     member_id = clean_id(payload.member_id)
     agent_id = clean_id(payload.agent_id)
     phone = to_e164(payload.phone or TEST_CALL_PHONE)
+    print(
+        f"📞 POST /make-call received — phone={phone} client_id={client_id} "
+        f"member_id={member_id} agent_id={agent_id}",
+        flush=True,
+    )
 
     if not phone:
         return JSONResponse(
@@ -444,53 +449,7 @@ async def _place_outbound_call(
             },
         )
 
-    openai_err = None
-    for attempt in range(1, 4):
-        try:
-            await ensure_openai_ready()
-            openai_err = None
-            break
-        except Exception as exc:
-            openai_err = exc
-            print(f"⚠️ OpenAI Realtime not ready (attempt {attempt}/3):", repr(exc))
-            if attempt < 3:
-                await asyncio.sleep(2.0 * attempt)
-    if openai_err is not None:
-        print("❌ make-call 503: OpenAI Realtime failed")
-        return JSONResponse(
-            status_code=503,
-            content={
-                "status": "error",
-                "error": f"OpenAI Realtime is not ready: {openai_err}",
-            },
-        )
-
-    http_base, probe = await resolve_twilio_stream_base(PUBLIC_BASE_URL)
-    if not http_base:
-        message = public_webhook_help(PUBLIC_BASE_URL, probe)
-        print("❌ make-call 503: public URL / tunnel:", probe)
-        return JSONResponse(
-            status_code=503,
-            content={
-                "status": "error",
-                "error": message,
-                "public_base_url": PUBLIC_BASE_URL or None,
-                "probe": probe,
-            },
-        )
-
-    stream_url, wss_base, wss_err = await resolve_media_stream_wss_url(http_base)
-    if wss_err or not stream_url:
-        print("❌ make-call 503: Media Stream WSS:", wss_err)
-        return JSONResponse(
-            status_code=503,
-            content={
-                "status": "error",
-                "error": wss_err or "Media Stream WSS URL not configured",
-                "hint": "Wait for server log: ✅ Gym AI ready — then retry.",
-            },
-        )
-
+    # Prefetch agent so ElevenLabs V1 calls can skip Realtime warmup.
     llc = LlcClient()
     agent = None
     if llc.enabled:
@@ -524,6 +483,60 @@ async def _place_outbound_call(
                 (agent_lookup or {}).get("error") or "no active agent for this client",
             )
 
+    if agent_uses_v2_live(agent):
+        from app.core.realtime import resolve_agent_model
+
+        wanted = resolve_agent_model(agent)
+        openai_err = None
+        for attempt in range(1, 4):
+            try:
+                await ensure_openai_ready(model=wanted)
+                openai_err = None
+                break
+            except Exception as exc:
+                openai_err = exc
+                print(f"⚠️ OpenAI Realtime not ready (attempt {attempt}/3):", repr(exc))
+                if attempt < 3:
+                    await asyncio.sleep(2.0 * attempt)
+        if openai_err is not None:
+            print("❌ make-call 503: OpenAI Realtime failed")
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "error",
+                    "error": f"OpenAI Realtime is not ready: {openai_err}",
+                },
+            )
+    else:
+        print("🎧 Skipping Realtime warmup — V1 pipeline (STT + Chat + TTS)")
+
+    http_base, probe = await resolve_twilio_stream_base(PUBLIC_BASE_URL)
+    if not http_base:
+        message = public_webhook_help(PUBLIC_BASE_URL, probe)
+        print("❌ make-call 503: public URL / tunnel:", probe)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "error",
+                "error": message,
+                "public_base_url": PUBLIC_BASE_URL or None,
+                "probe": probe,
+            },
+        )
+
+    stream_url, wss_base, wss_err = await resolve_media_stream_wss_url(http_base)
+    if wss_err or not stream_url:
+        print("❌ make-call 503: Media Stream WSS:", wss_err)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "error",
+                "error": wss_err or "Media Stream WSS URL not configured",
+                "hint": "Wait for server log: ✅ Gym AI ready — then retry.",
+            },
+        )
+
+    if llc.enabled:
         from app.core.crm_tools import agent_needs_crm_fetch
 
         if agent and agent_needs_crm_fetch(agent):
@@ -637,7 +650,8 @@ async def _place_outbound_call(
         answered=False,
         recording_status="pending",
     )
-    await recycle_openai_pool_after_outbound_dial()
+    if agent_uses_v2_live(agent):
+        await recycle_openai_pool_after_outbound_dial()
     print(
         "📡 If the call is silent, confirm Twilio can reach:",
         stream_url,

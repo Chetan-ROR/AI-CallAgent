@@ -177,10 +177,10 @@ class PlaybackAndPromptTests(unittest.TestCase):
         self.assertIn("Do not offer, promise, or schedule a free trainer consult", text)
         self.assertNotIn("someone from Total Bizz gym will reach out to schedule your free trainer consult", text)
 
-    def test_inbound_greeting_is_answering_style(self):
+    def test_inbound_greeting_uses_agent_first_message_when_set(self):
         agent = {
             "tools": {"book_guest_pass": True, "end_call": True},
-            "first_message": "Hi, this is Matt calling from Total Bizz. Can we talk?",
+            "first_message": "Bonjour, merci d'appeler Total Bizz. Comment puis-je vous aider?",
             "conversation_prompt": "You are the receptionist.",
         }
         opening = agent_spoken_opening(
@@ -189,8 +189,7 @@ class PlaybackAndPromptTests(unittest.TestCase):
             {"title": "Total Bizz"},
             direction="inbound",
         )
-        self.assertIn("Thanks for calling Total Bizz", opening)
-        self.assertNotIn("Matt calling", opening)
+        self.assertIn("Bonjour, merci d'appeler Total Bizz", opening)
         greeting = greeting_instructions(agent, None, {"title": "Total Bizz"}, direction="inbound")
         self.assertIn("inbound phone call", greeting.lower())
         self.assertIn("Do not say you are calling them", greeting)
@@ -202,6 +201,21 @@ class PlaybackAndPromptTests(unittest.TestCase):
         )
         self.assertIn("# INBOUND CALL", text)
         self.assertIn("Do not say you are calling them", text)
+
+    def test_inbound_greeting_default_when_first_message_blank(self):
+        agent = {
+            "tools": {"end_call": True},
+            "first_message": "",
+            "conversation_prompt": "You are the receptionist.",
+        }
+        opening = agent_spoken_opening(
+            agent,
+            None,
+            {"title": "Total Bizz"},
+            direction="inbound",
+        )
+        self.assertIn("Thanks for calling Total Bizz", opening)
+        self.assertNotIn("Matt calling", opening)
 
     def test_outbound_greeting_still_uses_agent_first_message(self):
         agent = {
