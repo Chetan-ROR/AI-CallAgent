@@ -10,3 +10,4 @@ sqlalchemy
 python-multipart
 boto3
 httpx
+audioop-lts; python_version >= "3.13"
