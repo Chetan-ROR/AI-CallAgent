@@ -18,9 +18,8 @@ from app.core.realtime import (
     VALID_VOICES,
     build_realtime_session,
     resolve_agent_model,
-    resolve_agent_voice,
     resolve_chat_model,
-    uses_elevenlabs_voice,
+    resolve_practice_tts,
 )
 from app.core.openai_chat_models import agent_uses_v2_live
 from app.elevenlabs.client import (
@@ -41,6 +40,7 @@ class PracticeSessionRequest(BaseModel):
     instructions: Optional[str] = None
     first_message: Optional[str] = None
     voice: Optional[str] = None
+    provider: Optional[str] = None
     client_id: Optional[str] = None
     agent_id: Optional[str] = None
     member_id: Optional[str] = None
@@ -270,9 +270,10 @@ async def _practice_llc_context(
     if not llc.enabled:
         return member, studio, agent
 
-    agent_res = await llc.lookup_agent(client_id=client_id, agent_id=agent_id)
-    if (agent_res or {}).get("success"):
-        agent = agent_res.get("agent") or {}
+    if agent_id:
+        agent_res = await llc.lookup_agent(client_id=client_id, agent_id=agent_id)
+        if (agent_res or {}).get("success"):
+            agent = agent_res.get("agent") or {}
 
     if agent_needs_crm_fetch(agent):
         crm = await llc.lookup_member(client_id=client_id, member_id=member_id)
@@ -293,7 +294,8 @@ async def create_practice_session(body: Optional[PracticeSessionRequest] = None)
     V2 Live agents → OpenAI Realtime (same as phone V2).
     V1 / ElevenLabs agents → OpenAI Realtime practice with agent prompt/language/tools;
     audio voice is OpenAI (browser cannot stream ElevenLabs μ-law like Twilio).
-    Prompt, first_message, model, language, tools always come from the LLC agent when loaded.
+    Prompt, first_message, model, language, tools, and voice always come from the LLC agent
+    identified by agent_id — not from a default receptionist and not mixed with another agent.
     """
     payload = body or PracticeSessionRequest()
     instructions = payload.instructions
@@ -307,30 +309,63 @@ async def create_practice_session(body: Optional[PracticeSessionRequest] = None)
     member: dict = {}
     studio: dict = {}
     agent: dict = {}
-    if client_id:
+    if agent_id:
+        if not client_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Test call needs the studio client_id for this agent.",
+            )
         member, studio, agent = await _practice_llc_context(
             client_id=client_id,
             agent_id=agent_id,
             member_id=member_id,
         )
-        if agent or studio:
-            instructions = build_instructions(member, studio, agent)
-        if agent:
-            first_message = agent_spoken_opening(agent, member, studio) or first_message
-
-    # Practice browser audio is always OpenAI Realtime. Prefer override → agent OpenAI voice → default.
-    # ElevenLabs voice ids are not valid Realtime voices; fall back to DEFAULT_VOICE.
-    practice_voice = resolve_agent_voice(
-        agent or None,
-        override=voice,
-        fallback=DEFAULT_VOICE,
-    )
-    if uses_elevenlabs_voice(agent) and not (voice or "").strip():
-        practice_voice = DEFAULT_VOICE
+        if not agent or not agent.get("id"):
+            raise HTTPException(
+                status_code=404,
+                detail="That agent was not found. Open the agent, save, and try Test call again.",
+            )
+        instructions = build_instructions(member, studio, agent)
+        first_message = agent_spoken_opening(agent, member, studio) or first_message
+        vs = agent.get("voice_settings") or {}
+        voice = vs.get("voice") or voice
         print(
-            "🎧 Practice uses OpenAI voice",
-            practice_voice,
-            "(agent ElevenLabs voice applies on phone calls)",
+            "🎧 Practice using saved agent:",
+            agent.get("name"),
+            agent.get("id"),
+            "voice=",
+            voice or "default",
+            "provider=",
+            (vs.get("provider") or "openai"),
+            "model=",
+            vs.get("model") or "default",
+            "lang=",
+            vs.get("language") or "en",
+            "tools=",
+            sorted(
+                k
+                for k, on in ((agent.get("tools") or {}).items())
+                if on
+            ),
+        )
+    elif client_id:
+        member, studio, agent = await _practice_llc_context(
+            client_id=client_id,
+            agent_id=None,
+            member_id=member_id,
+        )
+        if studio:
+            instructions = build_instructions(member, studio, agent or None)
+
+    # Browser Realtime cannot speak ElevenLabs voice ids. Play those via /practice/voice-preview.
+    tts_provider, tts_voice = resolve_practice_tts(agent or None, override=voice)
+    practice_voice = tts_voice if tts_provider == "openai" else DEFAULT_VOICE
+    speak_via_realtime = tts_provider != "elevenlabs"
+    if tts_provider == "elevenlabs":
+        print(
+            "🎧 Practice TTS ElevenLabs",
+            tts_voice,
+            "(Realtime stays text-only; same voice as the saved agent)",
         )
 
     v2 = agent_uses_v2_live(agent or None)
@@ -345,6 +380,7 @@ async def create_practice_session(body: Optional[PracticeSessionRequest] = None)
                 first_message=first_message,
                 voice=practice_voice,
                 agent=agent or None,
+                speak_via_realtime=speak_via_realtime,
             ),
         )
     except APIError as exc:
@@ -363,7 +399,9 @@ async def create_practice_session(body: Optional[PracticeSessionRequest] = None)
         "expires_at": secret.expires_at,
         "model": resolve_agent_model(agent or None) if v2 else model,
         "mode": "v2_live" if v2 else "v1_practice_realtime",
-        "voice": practice_voice,
+        "voice": tts_voice,
+        "tts_provider": tts_provider,
+        "tts_voice": tts_voice,
         "language": (agent.get("voice_settings") or {}).get("language") if agent else None,
         "agent_id": (agent.get("id") if agent else None) or agent_id,
     }

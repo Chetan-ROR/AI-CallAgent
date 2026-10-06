@@ -218,13 +218,11 @@ def is_elevenlabs_voice_id(voice_id: str | None) -> bool:
 
 def uses_elevenlabs_voice(agent: dict | None) -> bool:
     settings = _voice_settings(agent)
-    provider = str(settings.get("provider") or "").strip().lower()
     voice = str(settings.get("voice") or "").strip()
-    if provider == "elevenlabs":
-        return bool(voice)
-    if provider in ("openai", "realtime"):
-        return False
-    return is_elevenlabs_voice_id(voice)
+    if is_elevenlabs_voice_id(voice):
+        return True
+    provider = str(settings.get("provider") or "").strip().lower()
+    return provider == "elevenlabs" and bool(voice)
 
 
 def resolve_elevenlabs_voice_id(agent: dict | None) -> str | None:
@@ -233,6 +231,23 @@ def resolve_elevenlabs_voice_id(agent: dict | None) -> str | None:
     if not voice or voice.lower() in VALID_VOICES:
         return None
     return voice
+
+
+def resolve_practice_tts(
+    agent: dict | None = None,
+    *,
+    override: str | None = None,
+) -> tuple[str, str]:
+    """Browser practice TTS. ElevenLabs ids cannot be Realtime voices."""
+    over = str(override or "").strip()
+    if uses_elevenlabs_voice(agent) or is_elevenlabs_voice_id(over):
+        voice_id = resolve_elevenlabs_voice_id(agent) or (
+            over if is_elevenlabs_voice_id(over) else ""
+        )
+        if voice_id:
+            return "elevenlabs", voice_id
+    openai_over = over if over.lower() in VALID_VOICES else None
+    return "openai", resolve_agent_voice(agent, override=openai_over, fallback=DEFAULT_VOICE)
 
 
 def resolve_agent_model(
@@ -361,6 +376,8 @@ def build_realtime_session(
     first_message: Optional[str] = None,
     voice: Optional[str] = None,
     agent: Optional[dict] = None,
+    *,
+    speak_via_realtime: bool = True,
 ) -> dict[str, Any]:
     composed = compose_instructions(instructions, first_message, mode)
     # build_instructions already attaches language; only add if missing.
@@ -399,10 +416,9 @@ def build_realtime_session(
                     else {}
                 ),
             },
-            "output": {
-                "voice": chosen_voice,
-            },
         }
+        if speak_via_realtime:
+            audio["output"] = {"voice": chosen_voice}
 
     session: dict[str, Any] = {
         "type": "realtime",
@@ -410,7 +426,7 @@ def build_realtime_session(
         "instructions": composed,
         "tools": tools,
         "tool_choice": "auto" if tools else "none",
-        "output_modalities": ["audio"],
+        "output_modalities": ["audio"] if speak_via_realtime else ["text"],
         "audio": audio,
     }
     return session
