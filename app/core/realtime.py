@@ -174,7 +174,8 @@ def agent_language_instructions(agent: dict | None) -> str:
 
 Configured language: {name} ({code}) only.
 Every spoken sentence you produce MUST be in {name} — greeting, answers, confirmations, goodbye.
-Never switch to Hindi, English, or any other language because the caller used it.
+Understand the caller in any language (Hindi, English, Hinglish, mixed) and act on their intent.
+Never ask them to switch languages. Never say you only speak {name} / English.
 If the caller speaks Hindi / English / mixed, still answer only in {name}.
 Do not translate your reply into their language. Do not mirror their language.
 Ignore any script line that says "USA Midwestern", "speak English", or similar when it conflicts with {name}.
@@ -291,12 +292,22 @@ def agent_allow_interrupt(agent: dict | None, *, default: bool = True) -> bool:
     return default
 
 
-def resolve_agent_tools(agent: dict | None, *, tools_enabled: bool = True) -> list[dict[str, Any]]:
+def resolve_agent_tools(
+    agent: dict | None,
+    *,
+    tools_enabled: bool = True,
+    member: dict | None = None,
+) -> list[dict[str, Any]]:
     if not tools_enabled:
         return []
+    from app.core.crm_tools import member_has_active_guest_pass
+
+    skip_guest_pass = member_has_active_guest_pass(member)
     selected = []
     for tool in OPENAI_TOOLS:
         name = tool.get("name") or ""
+        if name == "book_guest_pass" and skip_guest_pass:
+            continue
         enabled = end_call_enabled(agent) if name == "end_call" else agent_tool_enabled(agent, name, default=False)
         if enabled:
             selected.append(tool)
@@ -360,7 +371,7 @@ def build_realtime_session(
         override=voice,
         fallback=DEFAULT_VOICE,
     )
-    tools = resolve_agent_tools(agent)
+    tools = resolve_agent_tools(agent, member=None)
     chosen_model = resolve_agent_model(agent)
     vad_base = PRACTICE_TURN_DETECTION if mode == "practice" else TURN_DETECTION
     turn_detection = turn_detection_for_agent(agent, base=vad_base)

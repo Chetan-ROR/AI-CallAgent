@@ -35,4 +35,34 @@ OPENAI_TOOLS = [
             "required": [],
         },
     },
+    {
+        "type": "function",
+        "name": "book_class_visit",
+        "description": (
+            "Book the caller into a gym class visit on the studio schedule. "
+            "Use only after they clearly ask to book a class and confirm the class name and time. "
+            "Pass the class name from CLASS SCHEDULE plus the start time (and weekday if they said one). "
+            "Do not call this for the 7 Day Guest Pass or a membership consultation. "
+            "Do not say they are booked until this tool succeeds. "
+            "If it returns other class names their pack covers, offer those and ask which one to book."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "class_name": {
+                    "type": "string",
+                    "description": "Exact class name from the CLASS SCHEDULE section.",
+                },
+                "start_time": {
+                    "type": "string",
+                    "description": "Class start time, ISO-8601 if known, otherwise like 6:00 PM.",
+                },
+                "day": {
+                    "type": "string",
+                    "description": "Weekday if they named one, e.g. Tuesday.",
+                },
+            },
+            "required": ["class_name"],
+        },
+    },
 ]

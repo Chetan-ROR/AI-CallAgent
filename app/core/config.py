@@ -30,7 +30,7 @@ APP_PORT = int(os.getenv("APP_PORT", "8004"))
 ELEVENLABS_API_KEY = (os.getenv("ELEVENLABS_API_KEY") or "").strip()
 ELEVENLABS_TTS_MODEL = (os.getenv("ELEVENLABS_TTS_MODEL") or "eleven_flash_v2_5").strip()
 # Phone V1 pipeline: OpenAI STT + Chat Completions + TTS (ElevenLabs or OpenAI Speech).
-OPENAI_STT_MODEL = (os.getenv("OPENAI_STT_MODEL") or "gpt-4o-mini-transcribe").strip()
+OPENAI_STT_MODEL = (os.getenv("OPENAI_STT_MODEL") or "gpt-4o-transcribe").strip()
 OPENAI_CHAT_MODEL = (os.getenv("OPENAI_CHAT_MODEL") or "gpt-4.1").strip()
 OPENAI_TTS_MODEL = (os.getenv("OPENAI_TTS_MODEL") or "gpt-4o-mini-tts").strip()
 

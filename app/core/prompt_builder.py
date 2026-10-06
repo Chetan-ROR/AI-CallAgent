@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from app.core.compliance import recording_consent_message
-from app.core.crm_tools import agent_needs_crm_fetch, agent_tool_enabled, end_call_enabled
+from app.core.crm_tools import (
+    agent_needs_crm_fetch,
+    agent_tool_enabled,
+    end_call_enabled,
+    member_has_active_guest_pass,
+)
 from app.core.realtime import agent_language_instructions
 from app.core.prompts import F45_SYSTEM_PROMPT
 
@@ -32,14 +37,14 @@ def call_is_inbound(direction: str | None = None) -> bool:
     return (direction or "").strip().lower() == "inbound"
 
 
-def _attach_language_policy(text: str, agent=None) -> str:
+def _attach_language_policy(text: str, agent=None, member=None) -> str:
     block = agent_language_instructions(agent).strip()
     # Put language first and last so it wins over a long English script.
     if block:
         body = (text or "").rstrip()
         if block not in body:
             text = f"{block}\n\n{body}\n\n{block}\n"
-    policy = tool_source_policy(agent).strip()
+    policy = tool_source_policy(agent, member=member).strip()
     if policy and policy not in (text or ""):
         text = f"{(text or '').rstrip()}\n\n{policy}\n"
     return text or ""
@@ -76,16 +81,18 @@ def _member_if_enabled(agent, member: dict | None) -> dict:
     return {}
 
 
-def tool_source_policy(agent=None) -> str:
+def tool_source_policy(agent=None, member=None) -> str:
     """Memberships, classes, the caller, and hang-up come only from enabled tools."""
     member_on = agent_tool_enabled(agent, "crm_member", default=False)
     classes_on = agent_tool_enabled(agent, "crm_class_schedule", default=False)
     pricing_on = agent_tool_enabled(agent, "crm_pricing", default=False)
     guest_pass_on = agent_tool_enabled(agent, "book_guest_pass", default=False)
+    class_visit_on = agent_tool_enabled(agent, "book_class_visit", default=False)
+    already_has_pass = member_has_active_guest_pass(member)
     end_on = end_call_enabled(agent)
 
     member_rule = (
-        "Member profile is ON. The caller's name, phone, email, visits, and their own membership status come only from the member section below. Do not invent a caller."
+        "Member profile is ON. The caller's name, phone, email, visits, class packs, and their own membership status come only from the member section below. Do not invent a caller. If they ask what plan or class package they have, read Membership and Class packs. Do not say they have none when a pack is listed. Do not offer the 7 Day Guest Pass in that same turn."
         if member_on
         else "Member profile is OFF. Do not use a caller name, phone, email, visit history, or their membership status. Ignore {{contact.*}} leftovers and any name in an older script."
     )
@@ -94,7 +101,25 @@ def tool_source_policy(agent=None) -> str:
         if classes_on
         else "Class schedule is OFF. Do not name classes, days, or class times. If they ask, say you don't have the class schedule on this call."
     )
-    if guest_pass_on:
+    if class_visit_on:
+        class_rule += (
+            " Book class visit is ON. If they ask to book a class, confirm the exact class name and time from CLASS SCHEDULE, "
+            "wait for a clear yes to that slot, then call book_class_visit. "
+            "Do not say they are booked until the tool succeeds. "
+            "The 7 Day Guest Pass does not book gym classes. "
+            "If the tool lists other classes their pack covers, offer those 2-3 names and ask which one to book."
+        )
+    if guest_pass_on and already_has_pass:
+        pricing_rule = (
+            "7 Day Guest Pass is configured on this agent, BUT this caller ALREADY HAS an active 7 Day Guest Pass. "
+            "Do NOT offer, pitch, sell, or book another 7 Day Guest Pass on this call. "
+            "You MAY ask for feedback on their current 7 Day Guest Pass — how it is going, what they like, "
+            "or any issue — and listen. Do not turn feedback into a sales pitch for the same pass. "
+            "If they ask to book it again, say it is already on their account, in one sentence. "
+            "Do not name, quote, or sell any other membership, pack, discount, or price. "
+            "Do not offer, promise, or schedule a free trainer consult."
+        )
+    elif guest_pass_on:
         pricing_rule = (
             "7 Day Guest Pass is ON. The only plan you may offer or book is the 7 Day Guest Pass. "
             "Do not name, quote, or sell any other membership, pack, discount, or price. "
@@ -106,7 +131,8 @@ def tool_source_policy(agent=None) -> str:
             "If they are not already a member, ask for first name, last name, and email first, then call the tool. "
             "If the tool says they are not linked to Mindbody and need an email, ask for the missing name or email and call the tool again. "
             "The phone number is already on the call. Creating that member and booking this pass is allowed. "
-            "When the tool says the pass is booked, say only that it is on their account, in one sentence, with no question. "
+            "When the tool says the pass is booked, confirm it is on their account in one sentence, "
+            "then ask once if there is anything else you can help with. Do not hang up in that turn. "
             "On a call, buy a plan for an existing caller only when they do not already have that same plan, or the one they had has expired. "
             "If the tool says they already have the 7 Day Guest Pass, tell them it is already on their account, in one sentence. Do not book it again and do not say you just booked it. "
             "Do not offer, promise, or schedule a free trainer consult. Do not say someone will reach out about a consult. "
@@ -193,7 +219,8 @@ def _agent_phase_instructions(
     phase: str = "",
 ) -> str:
     agent = _agent(agent)
-    member = _member_if_enabled(agent, member)
+    raw_member = member or {}
+    member = _member_if_enabled(agent, raw_member)
     base = apply_contact_tokens(agent_conversation_prompt(agent), member, studio)
     phase = (phase or "").strip()
     parts = [base]
@@ -207,7 +234,7 @@ def _agent_phase_instructions(
         )
     if phase:
         parts.append(f"# CURRENT CALL PHASE\n{phase}")
-    return _attach_language_policy("\n\n".join(parts), agent)
+    return _attach_language_policy("\n\n".join(parts), agent, member=raw_member)
 
 
 def greeting_instructions(
@@ -398,18 +425,42 @@ def _visit_line(visit: dict | None) -> str:
 
 def _membership_line(membership) -> str:
     if not membership:
-        return "Unknown"
+        return "None on file"
     if isinstance(membership, list):
         if not membership:
-            return "Unknown"
+            return "None on file"
         membership = membership[0]
-    name = membership.get("name")
-    status = membership.get("status")
+    name = str(membership.get("name") or "").strip()
+    status = str(membership.get("status") or "").strip()
+    if not name and status in {"", "-", "unknown"}:
+        return "None on file"
     remaining = membership.get("remaining")
-    bits = [bit for bit in [name, status] if bit]
+    bits = [bit for bit in [name, status] if bit and bit != "-"]
     if remaining not in (None, ""):
         bits.append(f"remaining {remaining}")
-    return ", ".join(bits) if bits else "Unknown"
+    return ", ".join(bits) if bits else "None on file"
+
+
+def _class_packs_line(member: dict) -> str:
+    packs = member.get("class_packs") or []
+    if not isinstance(packs, list) or not packs:
+        return "None on file"
+    lines = []
+    for pack in packs:
+        if not isinstance(pack, dict):
+            continue
+        name = str(pack.get("name") or "").strip()
+        if not name:
+            continue
+        bits = [name]
+        status = str(pack.get("status") or "").strip()
+        if status and status not in {"-", "unknown"}:
+            bits.append(status)
+        remaining = pack.get("remaining")
+        if remaining not in (None, ""):
+            bits.append(f"{remaining} remaining")
+        lines.append(" — ".join(bits))
+    return "; ".join(lines) if lines else "None on file"
 
 
 def _format_schedule_days(days) -> str:
@@ -578,13 +629,21 @@ def build_crm_prompt_addon(
     if agent_tool_enabled(agent, "crm_member", default=False):
         if is_known_member(member):
             first_name = member_display_first_name(member) or _value(member, "first_name", default="")
+            guest_line = ""
+            if member_has_active_guest_pass(member):
+                guest_line = (
+                    "\nActive plan: 7 Day Guest Pass — already on account. "
+                    "Do NOT offer or book this pass again. You may ask for feedback on this pass."
+                )
             parts.append(
                 f"""
 Member CRM id: {member.get("id")}
 Membership: {_membership_line(member.get("membership"))}
+Class packs on account: {_class_packs_line(member)}
 Total visits: {member.get("total_visits", 0)}
 Last visit: {_visit_line(member.get("last_visit"))}
-Next visit: {_visit_line(member.get("next_visit"))}
+Next visit: {_visit_line(member.get("next_visit"))}{guest_line}
+If they ask about their membership, plan, or class packages, read Membership and Class packs. Never say they have none when a pack is listed. Do not offer the 7 Day Guest Pass in that same turn.
 Use their first name ({first_name or "from CRM"}) when appropriate.
 """.strip()
             )
@@ -593,16 +652,29 @@ Use their first name ({first_name or "from CRM"}) when appropriate.
                 "No matching member profile for this call. Do not invent their name or visit history."
             )
 
-    if agent_tool_enabled(agent, "crm_class_schedule", default=False):
+    if agent_tool_enabled(agent, "crm_class_schedule", default=False) or agent_tool_enabled(
+        agent, "book_class_visit", default=False
+    ):
         parts.append(_class_schedule_block(studio).strip())
 
-    if guest_pass_on:
+    if guest_pass_on and member_has_active_guest_pass(member):
+        parts.append(
+            "# PLAN — ALREADY ACTIVE (FEEDBACK OK)\n\n"
+            "This caller ALREADY HAS an active 7 Day Guest Pass on their account.\n"
+            "Do NOT offer, pitch, sell, or book another 7 Day Guest Pass.\n"
+            "You MAY ask how their 7 Day Guest Pass is going and take brief feedback "
+            "(likes, issues, questions). Do not push them to buy the same pass again.\n"
+            "If they ask to get or book the guest pass again, say it is already on their account, "
+            "in one sentence.\n"
+            "Do not offer a free trainer consult or say someone will reach out about a consult."
+        )
+    elif guest_pass_on:
         parts.append(
             "# PLAN YOU MAY OFFER\n\n"
             "Only offer the 7 Day Guest Pass. Do not read any other plan from the script or from CRM.\n"
             "Ask if they want it, then wait. Call book_guest_pass only after a clear yes to that pass.\n"
             "For a new caller, collect first name, last name, and email first.\n"
-            "After it books, say it is on their account in one sentence and do not ask a question in that sentence.\n"
+            "After it books, confirm it is on their account, then ask once if they need anything else.\n"
             "If they already have that pass and it has not expired, say it is already on their account. Do not book it again.\n"
             "Book it again only when they do not have it, or the same pass has expired.\n"
             "Do not offer a free trainer consult or say someone will reach out about a consult."
@@ -622,7 +694,9 @@ def build_instructions(
 ) -> str:
     studio = studio or {}
     agent = _agent(agent)
-    member = _member_if_enabled(agent, member or {})
+    raw_member = member or {}
+    already_has_pass = member_has_active_guest_pass(raw_member)
+    member = _member_if_enabled(agent, raw_member)
     inbound = call_is_inbound(direction)
 
     if not is_known_member(member):
@@ -637,9 +711,14 @@ def build_instructions(
         studio_name = "Total Bizz gym"
     studio_location = _value(studio, "location", default="6322 Clayton Avenue, 63139")
 
+    member_for_crm = {
+        **member,
+        "has_active_guest_pass": raw_member.get("has_active_guest_pass"),
+        "guest_pass_status": raw_member.get("guest_pass_status"),
+    }
     crm_addon = build_crm_prompt_addon(
         agent,
-        member,
+        member_for_crm,
         studio,
         studio_name=studio_name,
         studio_location=studio_location,
@@ -658,7 +737,16 @@ def build_instructions(
         text = prompt + crm_addon
         if inbound:
             text += inbound_rules
-        if guest_pass_on:
+        if guest_pass_on and already_has_pass:
+            text += (
+                "\n# GUEST PASS CALL RULES\n\n"
+                "This caller already has an active 7 Day Guest Pass.\n"
+                "Do NOT offer or book another 7 Day Guest Pass.\n"
+                "You may ask for feedback on their current guest pass and listen.\n"
+                "Do not offer, promise, or schedule a free trainer consult.\n"
+                f"After feedback or their question, thank them. {hangup}\n"
+            )
+        elif guest_pass_on:
             text += (
                 "\n# GUEST PASS CALL RULES\n\n"
                 "Only offer and book the 7 Day Guest Pass.\n"
@@ -666,9 +754,32 @@ def build_instructions(
                 "Do not say someone will reach out about a consult.\n"
                 f"After the pass is booked or they already have it, thank them and end the call. {hangup}\n"
             )
-        return _attach_language_policy(text, agent)
+        return _attach_language_policy(text, agent, member=raw_member)
 
-    if guest_pass_on:
+    if guest_pass_on and already_has_pass:
+        if is_known_member(member):
+            caller_line = (
+                f"Use the customer's real first name ({first_name or 'from CRM'}) from the member tool."
+            )
+        else:
+            caller_line = (
+                f"Studio: {studio_name}\n"
+                f"Studio location: {studio_location}\n"
+                "Caller details come only from the member tool section below."
+            )
+        history = f"""
+
+# CALL CONTEXT
+
+{caller_line}
+{"The customer called the studio. Answer them; do not say you called them." if inbound else ""}
+This caller already has an active 7 Day Guest Pass. Do NOT offer or book another one.
+You may ask for feedback on their current guest pass and listen briefly.
+Do not offer, promise, or schedule a free trainer consult.
+Do not call send_sms. Do not promise a text.
+After feedback or help, thank them. {hangup}
+"""
+    elif guest_pass_on:
         if is_known_member(member):
             caller_line = (
                 f"Use the customer's real first name ({first_name or 'from CRM'}) from the member tool."
@@ -714,7 +825,7 @@ Use the customer's real first name ({first_name or "from CRM"}) from the member 
 Share class or membership details only when that tool's section is present below.
 Do not call send_sms. Do not promise a text.
 If they want the free consult: thank them by first name, say someone from Total Bizz gym will reach out to schedule it, say thanks for your time. {hangup}
-Do not create a member. Do not book them into a class on this call.
+Do not create a member.
 """
     else:
         history = f"""
@@ -740,4 +851,4 @@ If they are interested in the free trainer consult (yes, sure, book it, sign me 
 Do not invent a booking or say they are locked in for a visit unless staff confirmed it.
 """
 
-    return _attach_language_policy(prompt + history + crm_addon, agent)
+    return _attach_language_policy(prompt + history + crm_addon, agent, member=raw_member)

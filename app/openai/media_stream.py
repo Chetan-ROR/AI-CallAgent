@@ -90,7 +90,8 @@ def _clean(value):
 
 def _agent_tools(stream_info: dict | None, *, tools_enabled: bool):
     agent = (stream_info or {}).get("agent") or {}
-    return resolve_agent_tools(agent, tools_enabled=tools_enabled)
+    member = (stream_info or {}).get("member") or {}
+    return resolve_agent_tools(agent, tools_enabled=tools_enabled, member=member)
 
 
 def _session_config(
@@ -409,10 +410,14 @@ async def load_crm_context(stream_info: dict, *, force: bool = False):
     if member.get("id"):
         stream_info["member"] = member
         stream_info["member_id"] = member.get("id") or stream_info.get("member_id")
+        if member.get("has_active_guest_pass"):
+            stream_info["has_active_guest_pass"] = True
+            print("🎟️ Member already has active 7 Day Guest Pass — offer skipped")
         print(
             "👤 CRM member on stream:",
             member.get("first_name") or member.get("full_name"),
             stream_info["member_id"],
+            f"guest_pass={member.get('guest_pass_status') or 'n/a'}",
         )
     elif member_id:
         print("⚠️ member_id on call but CRM member payload is empty:", member_id)
@@ -784,8 +789,15 @@ async def receive_from_openai(live, ws, stream_info):
 
                 print("🔧", function_name, arguments)
 
+                if function_name in ("book_guest_pass", "book_class_visit"):
+                    stream_info["block_end_call_after_book"] = False
                 result = await dispatch_tool(function_name, arguments, stream_info)
                 print("🔧 result:", result)
+
+                if function_name in ("book_guest_pass", "book_class_visit"):
+                    stream_info["block_end_call_after_book"] = True
+                    stream_info["end_call_requested"] = False
+                    stream_info["hangup_after_goodbye"] = False
 
                 if function_name == "end_call" and result.get("success"):
                     stream_info["end_call_requested"] = True

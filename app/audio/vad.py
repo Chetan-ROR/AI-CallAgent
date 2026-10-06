@@ -13,9 +13,11 @@ class UtteranceVad:
     frame_ms: int = 20
     start_threshold: float = 450.0
     continue_threshold: float = 280.0
-    silence_ms: int = 800
-    min_speech_ms: int = 280
-    max_speech_ms: int = 15_000
+    # Slightly longer end-silence cuts fewer mid-phrase / noisy fragments
+    # (short clips are what make gpt-4o-transcribe invent names/sentences).
+    silence_ms: int = 600
+    min_speech_ms: int = 300
+    max_speech_ms: int = 12_000
 
     speaking: bool = False
     _speech_ms: int = 0

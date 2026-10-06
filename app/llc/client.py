@@ -181,6 +181,29 @@ class LlcClient:
             },
         )
 
+    async def book_class_visit(
+        self,
+        *,
+        client_id=None,
+        phone=None,
+        member_id=None,
+        class_name=None,
+        start_time=None,
+        day=None,
+    ):
+        return await self._request(
+            "POST",
+            "/ai/class_visit",
+            json_body={
+                "client_id": self._client_id(client_id),
+                "phone": phone,
+                "member_id": member_id,
+                "class_name": class_name,
+                "start_time": start_time,
+                "day": day,
+            },
+        )
+
     async def resolve_studio_by_phone(self, *, phone=None):
         return await self._request(
             "GET",

@@ -564,7 +564,15 @@ async def _place_outbound_call(
                     "plans",
                 )
                 if lookup.get("found") and lookup.get("member"):
-                    print("👤 CRM member:", lookup.get("member", {}).get("first_name"), member_id)
+                    m = lookup.get("member") or {}
+                    print(
+                        "👤 CRM member:",
+                        m.get("first_name"),
+                        member_id,
+                        f"guest_pass={m.get('guest_pass_status') or 'n/a'}",
+                    )
+                    if m.get("has_active_guest_pass"):
+                        print("🎟️ Active 7 Day Guest Pass on account — will not offer on this call")
             else:
                 print(
                     "⚠️ Studio catalog not loaded:",
