@@ -236,8 +236,10 @@ async def finish_call_record(stream_info: dict) -> None:
         else:
             status = "saved" if saved else "failed"
 
+    client = LlcClient()
+    recording_key = (saved or {}).get("recording_key")
     try:
-        result = await LlcClient().complete_phone_call(
+        result = await client.complete_phone_call(
             client_id=client_id,
             call_sid=call_sid,
             recording_status=status,
@@ -245,16 +247,58 @@ async def finish_call_record(stream_info: dict) -> None:
             duration_seconds=duration,
             audio_bytes=(saved or {}).get("recording_bytes"),
             filename=(saved or {}).get("filename"),
-        )
-        print(
-            "🎙️ Call record finished:",
-            status,
-            result.get("error")
-            or (result.get("phone_call") or {}).get("recording_key")
-            or "",
+            recording_key=recording_key,
         )
     except Exception as exc:
         print("🎙️ Call record complete failed:", repr(exc))
+        result = {"success": False, "error": repr(exc)}
+
+    phone_call = result.get("phone_call") or {}
+    saved_ok = bool(result.get("success")) and phone_call.get("recording_status") == "saved"
+    if status == "saved" and not saved_ok and recording_key:
+        print(
+            "🎙️ Multipart upload missed; retrying with local recording_key:",
+            recording_key,
+            result.get("error") or "",
+        )
+        try:
+            result = await client.complete_phone_call(
+                client_id=client_id,
+                call_sid=call_sid,
+                recording_status="saved",
+                storage="local",
+                duration_seconds=duration,
+                recording_key=recording_key,
+            )
+        except Exception as exc:
+            print("🎙️ Call record key-only complete failed:", repr(exc))
+            result = {"success": False, "error": repr(exc)}
+        phone_call = result.get("phone_call") or {}
+        saved_ok = bool(result.get("success")) and phone_call.get("recording_status") == "saved"
+
+    if status == "saved" and not saved_ok:
+        error = result.get("error") or phone_call.get("recording_status") or "upload failed"
+        print("🎙️ Recording could not be registered, marking failed:", error)
+        try:
+            result = await client.complete_phone_call(
+                client_id=client_id,
+                call_sid=call_sid,
+                recording_status="failed",
+                storage="local",
+                duration_seconds=duration,
+            )
+        except Exception as exc:
+            print("🎙️ Call record failed-status update failed:", repr(exc))
+            return
+        status = "failed"
+
+    print(
+        "🎙️ Call record finished:",
+        status,
+        result.get("error")
+        or (result.get("phone_call") or {}).get("recording_key")
+        or "",
+    )
 
 
 async def _cancel_active_response(openai, stream_info):

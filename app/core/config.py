@@ -33,6 +33,12 @@ ELEVENLABS_TTS_MODEL = (os.getenv("ELEVENLABS_TTS_MODEL") or "eleven_flash_v2_5"
 OPENAI_STT_MODEL = (os.getenv("OPENAI_STT_MODEL") or "gpt-4o-transcribe").strip()
 OPENAI_CHAT_MODEL = (os.getenv("OPENAI_CHAT_MODEL") or "gpt-4.1").strip()
 OPENAI_TTS_MODEL = (os.getenv("OPENAI_TTS_MODEL") or "gpt-4o-mini-tts").strip()
+# Local WAV fallback (no S3). On the same host as Rails, point this at the same
+# directory as PHONE_CALL_RECORDINGS_DIR so playback works even if upload fails.
+RECORDING_LOCAL_DIR = (
+    os.getenv("RECORDING_LOCAL_DIR")
+    or str(Path(__file__).resolve().parents[2] / "recordings")
+).strip()
 
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY not found in .env")

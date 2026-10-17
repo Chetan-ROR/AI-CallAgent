@@ -270,6 +270,7 @@ class LlcClient:
         duration_seconds=None,
         audio_bytes=None,
         filename=None,
+        recording_key=None,
     ):
         fields = {
             "client_id": self._client_id(client_id),
@@ -277,6 +278,7 @@ class LlcClient:
             "recording_status": recording_status,
             "storage": storage,
             "duration_seconds": duration_seconds,
+            "recording_key": recording_key,
         }
         if audio_bytes:
             return await self._request(

@@ -12,7 +12,11 @@ import base64
 import io
 import threading
 import time
+import uuid
 import wave
+from pathlib import Path
+
+from app.core.config import RECORDING_LOCAL_DIR
 
 _SAMPLE_RATE = 8000
 _SILENCE = 0xFF
@@ -73,6 +77,11 @@ def _pcm_track(buf: bytearray, origin: int, length: int) -> array.array:
 
 
 def _wav_bytes(inbound: bytearray, in_origin: int, outbound: bytearray, out_origin: int) -> bytes:
+    """Mix caller + agent into a mono WAV.
+
+    Mono keeps ~1 minute uploads under common 1MB reverse-proxy limits
+    (stereo 8kHz PCM is ~2MB/min and often leaves recording_status pending).
+    """
     in_end = in_origin + len(inbound)
     out_end = out_origin + len(outbound)
     length = max(in_end, out_end, 0)
@@ -82,11 +91,10 @@ def _wav_bytes(inbound: bytearray, in_origin: int, outbound: bytearray, out_orig
     right = _pcm_track(outbound, out_origin, length)
     mixed = array.array("h")
     for index in range(length):
-        mixed.append(left[index])
-        mixed.append(right[index])
+        mixed.append(max(-32768, min(32767, (left[index] + right[index]) // 2)))
     handle = io.BytesIO()
     with wave.open(handle, "wb") as wav:
-        wav.setnchannels(2)
+        wav.setnchannels(1)
         wav.setsampwidth(2)
         wav.setframerate(_SAMPLE_RATE)
         wav.writeframes(mixed.tobytes())
@@ -168,11 +176,26 @@ class CallRecorder:
             print("🎙️ No media-stream audio to save", self.call_sid)
             return None
         filename = f"{self.call_sid}.wav"
-        print("🎙️ Recording ready to upload to LLC", filename, f"({len(wav)} bytes)")
+        relative_key = (
+            f"{self.client_id}/{filename}" if self.client_id else filename
+        )
+        folder = Path(RECORDING_LOCAL_DIR)
+        if self.client_id:
+            folder = folder / self.client_id
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / filename
+        path.write_bytes(wav)
+        print(
+            "🎙️ Recording saved locally",
+            path,
+            f"({len(wav)} bytes) — also uploading to LLC",
+        )
         return {
             "storage": "local",
             "recording_bytes": wav,
             "filename": filename,
+            "recording_key": relative_key,
+            "local_path": str(path),
         }
 
     def duration_seconds(self) -> int:
