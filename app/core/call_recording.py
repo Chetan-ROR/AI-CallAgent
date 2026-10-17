@@ -76,25 +76,31 @@ def _pcm_track(buf: bytearray, origin: int, length: int) -> array.array:
     return samples
 
 
-def _wav_bytes(inbound: bytearray, in_origin: int, outbound: bytearray, out_origin: int) -> bytes:
-    """Mix caller + agent into a mono WAV.
+def _wav_bytes(
+    inbound: bytearray,
+    in_origin: int,
+    outbound: bytearray,
+    out_origin: int,
+    *,
+    target_length: int,
+) -> bytes:
+    """Build a stereo WAV of the exact call: caller left, agent right.
 
-    Mono keeps ~1 minute uploads under common 1MB reverse-proxy limits
-    (stereo 8kHz PCM is ~2MB/min and often leaves recording_status pending).
+    ``target_length`` is the call length in samples so the file matches the
+    live call duration (pad with silence or trim queued TTS past hangup).
     """
-    in_end = in_origin + len(inbound)
-    out_end = out_origin + len(outbound)
-    length = max(in_end, out_end, 0)
+    length = max(0, int(target_length))
     if length <= 0:
         return b""
     left = _pcm_track(inbound, in_origin, length)
     right = _pcm_track(outbound, out_origin, length)
     mixed = array.array("h")
     for index in range(length):
-        mixed.append(max(-32768, min(32767, (left[index] + right[index]) // 2)))
+        mixed.append(left[index])
+        mixed.append(right[index])
     handle = io.BytesIO()
     with wave.open(handle, "wb") as wav:
-        wav.setnchannels(1)
+        wav.setnchannels(2)
         wav.setsampwidth(2)
         wav.setframerate(_SAMPLE_RATE)
         wav.writeframes(mixed.tobytes())
@@ -113,6 +119,7 @@ class CallRecorder:
         self._out_origin = 0
         self._out_playhead = 0
         self._closed = False
+        self._duration_seconds = 0
 
     def _now_index(self) -> int:
         return int((time.monotonic() - self._t0) * _SAMPLE_RATE)
@@ -125,14 +132,9 @@ class CallRecorder:
             raw = base64.b64decode(payload)
         except Exception:
             return
-        timestamp = (media or {}).get("timestamp")
-        if timestamp not in (None, ""):
-            try:
-                index = int(float(timestamp) * _SAMPLE_RATE / 1000)
-            except (TypeError, ValueError):
-                index = self._now_index()
-        else:
-            index = self._now_index()
+        # Prefer wall-clock so length matches the live call. Twilio timestamps
+        # can drift from when this recorder started (CRM load, etc.).
+        index = self._now_index()
         with self._lock:
             if self._closed:
                 return
@@ -148,6 +150,8 @@ class CallRecorder:
         with self._lock:
             if self._closed:
                 return
+            # Place at the live playhead, but never before "now", so the agent
+            # track stays aligned with wall-clock call time.
             now = self._now_index()
             start = max(self._out_playhead, now)
             self._outbound, self._out_origin = _place(self._outbound, self._out_origin, start, raw)
@@ -167,11 +171,24 @@ class CallRecorder:
             if self._closed:
                 return None
             self._closed = True
+            # Exact call length = wall clock from stream/recorder start to hangup.
+            end_index = max(1, self._now_index())
             inbound = bytearray(self._inbound)
             in_origin = self._in_origin
             outbound = bytearray(self._outbound)
             out_origin = self._out_origin
-        wav = _wav_bytes(inbound, in_origin, outbound, out_origin)
+            # TTS may have been queued ahead of realtime; cut at hangup.
+            inbound, in_origin = _truncate(inbound, in_origin, end_index)
+            outbound, out_origin = _truncate(outbound, out_origin, end_index)
+            self._duration_seconds = max(1, int(round(end_index / _SAMPLE_RATE)))
+
+        wav = _wav_bytes(
+            inbound,
+            in_origin,
+            outbound,
+            out_origin,
+            target_length=end_index,
+        )
         if not wav:
             print("🎙️ No media-stream audio to save", self.call_sid)
             return None
@@ -188,7 +205,7 @@ class CallRecorder:
         print(
             "🎙️ Recording saved locally",
             path,
-            f"({len(wav)} bytes) — also uploading to LLC",
+            f"({len(wav)} bytes, {self._duration_seconds}s) — also uploading to LLC",
         )
         return {
             "storage": "local",
@@ -196,7 +213,10 @@ class CallRecorder:
             "filename": filename,
             "recording_key": relative_key,
             "local_path": str(path),
+            "duration_seconds": self._duration_seconds,
         }
 
     def duration_seconds(self) -> int:
+        if self._duration_seconds:
+            return self._duration_seconds
         return max(0, int(time.monotonic() - self._t0))

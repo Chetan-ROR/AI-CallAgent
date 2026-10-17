@@ -187,6 +187,21 @@ async def _twilio_clear(ws, stream_info):
         print("⚠️ Twilio clear failed:", repr(exc))
 
 
+def start_call_recorder(stream_info: dict) -> None:
+    """Start the recorder as soon as the Twilio stream starts.
+
+    Must run before CRM/agent loads so WAV length matches the full call.
+    """
+    if stream_info.get("recorder"):
+        return
+    call_sid = (stream_info.get("call_sid") or "").strip()
+    client_id = (stream_info.get("client_id") or "").strip()
+    if not call_sid or not client_id:
+        return
+    stream_info["recorder"] = CallRecorder(call_sid=call_sid, client_id=client_id)
+    print("🎙️ Recorder started at stream start", call_sid)
+
+
 async def open_call_record(stream_info: dict) -> None:
     call_sid = (stream_info.get("call_sid") or "").strip()
     phone = (stream_info.get("phone") or "").strip()
@@ -200,7 +215,10 @@ async def open_call_record(stream_info: dict) -> None:
     member_id = member.get("id") if is_known_member(member) else None
     record_audio = bool(agent) and allows_audio_recording(agent)
     if record_audio:
-        stream_info["recorder"] = CallRecorder(call_sid=call_sid, client_id=client_id)
+        start_call_recorder(stream_info)
+    elif stream_info.get("recorder"):
+        # Compliance turned recording off after we already started capturing.
+        stream_info.pop("recorder", None)
 
     try:
         result = await LlcClient().open_phone_call(
@@ -227,14 +245,15 @@ async def finish_call_record(stream_info: dict) -> None:
     duration = None
     status = "skipped"
     if recorder:
-        duration = recorder.duration_seconds()
         try:
             saved = await asyncio.to_thread(recorder.finish)
         except Exception as exc:
             print("🎙️ Recording save failed:", repr(exc))
             status = "failed"
+            duration = recorder.duration_seconds()
         else:
             status = "saved" if saved else "failed"
+            duration = (saved or {}).get("duration_seconds") or recorder.duration_seconds()
 
     client = LlcClient()
     recording_key = (saved or {}).get("recording_key")
@@ -1297,6 +1316,8 @@ async def media_stream(ws: WebSocket):
 
                 print("📞", stream_info["call_sid"], stream_info["phone"], stream_info["direction"])
                 mark_media_stream_started(stream_info.get("call_sid"))
+                # Capture from the first moment so recording length == call length.
+                start_call_recorder(stream_info)
 
                 await load_agent_context(stream_info)
                 await load_crm_context(stream_info)
