@@ -193,26 +193,26 @@ class CallRecorder:
             print("🎙️ No media-stream audio to save", self.call_sid)
             return None
         filename = f"{self.call_sid}.wav"
-        relative_key = (
-            f"{self.client_id}/{filename}" if self.client_id else filename
-        )
         folder = Path(RECORDING_LOCAL_DIR)
         if self.client_id:
             folder = folder / self.client_id
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / filename
         path.write_bytes(wav)
+        # Absolute path — same as the old working flow so Rails can play
+        # from disk when multipart upload fails (no S3 needed).
+        recording_key = str(path.resolve())
         print(
             "🎙️ Recording saved locally",
-            path,
+            recording_key,
             f"({len(wav)} bytes, {self._duration_seconds}s) — also uploading to LLC",
         )
         return {
             "storage": "local",
             "recording_bytes": wav,
             "filename": filename,
-            "recording_key": relative_key,
-            "local_path": str(path),
+            "recording_key": recording_key,
+            "local_path": recording_key,
             "duration_seconds": self._duration_seconds,
         }
 
