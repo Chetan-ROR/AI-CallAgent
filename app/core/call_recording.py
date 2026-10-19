@@ -1,8 +1,8 @@
-"""Mix Twilio media-stream audio in memory, then hand the WAV to LLC (Rails).
+"""Mix Twilio media-stream audio in memory, then upload the WAV to LLC (Rails).
 
 Inbound caller audio and outbound agent audio are both mulaw 8 kHz from the
 media stream. They are mixed into one stereo WAV (caller left, agent right).
-Nothing is written to disk in gym-ai-poc — Rails stores the file.
+Nothing is written to disk here — Rails owns storage under storage/recordings.
 """
 
 from __future__ import annotations
@@ -14,9 +14,6 @@ import threading
 import time
 import uuid
 import wave
-from pathlib import Path
-
-from app.core.config import RECORDING_LOCAL_DIR
 
 _SAMPLE_RATE = 8000
 _SILENCE = 0xFF
@@ -190,29 +187,18 @@ class CallRecorder:
             target_length=end_index,
         )
         if not wav:
-            print("🎙️ No media-stream audio to save", self.call_sid)
+            print("🎙️ No media-stream audio to upload", self.call_sid)
             return None
         filename = f"{self.call_sid}.wav"
-        folder = Path(RECORDING_LOCAL_DIR)
-        if self.client_id:
-            folder = folder / self.client_id
-        folder.mkdir(parents=True, exist_ok=True)
-        path = folder / filename
-        path.write_bytes(wav)
-        # Absolute path — same as the old working flow so Rails can play
-        # from disk when multipart upload fails (no S3 needed).
-        recording_key = str(path.resolve())
         print(
-            "🎙️ Recording saved locally",
-            recording_key,
-            f"({len(wav)} bytes, {self._duration_seconds}s) — also uploading to LLC",
+            "🎙️ Recording ready for Rails upload",
+            filename,
+            f"({len(wav)} bytes, {self._duration_seconds}s)",
         )
         return {
             "storage": "local",
             "recording_bytes": wav,
             "filename": filename,
-            "recording_key": recording_key,
-            "local_path": recording_key,
             "duration_seconds": self._duration_seconds,
         }
 

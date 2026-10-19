@@ -256,7 +256,6 @@ async def finish_call_record(stream_info: dict) -> None:
             duration = (saved or {}).get("duration_seconds") or recorder.duration_seconds()
 
     client = LlcClient()
-    recording_key = (saved or {}).get("recording_key")
     try:
         result = await client.complete_phone_call(
             client_id=client_id,
@@ -266,7 +265,6 @@ async def finish_call_record(stream_info: dict) -> None:
             duration_seconds=duration,
             audio_bytes=(saved or {}).get("recording_bytes"),
             filename=(saved or {}).get("filename"),
-            recording_key=recording_key,
         )
     except Exception as exc:
         print("🎙️ Call record complete failed:", repr(exc))
@@ -274,30 +272,9 @@ async def finish_call_record(stream_info: dict) -> None:
 
     phone_call = result.get("phone_call") or {}
     saved_ok = bool(result.get("success")) and phone_call.get("recording_status") == "saved"
-    if status == "saved" and not saved_ok and recording_key:
-        print(
-            "🎙️ Multipart upload missed; retrying with local recording_key:",
-            recording_key,
-            result.get("error") or "",
-        )
-        try:
-            result = await client.complete_phone_call(
-                client_id=client_id,
-                call_sid=call_sid,
-                recording_status="saved",
-                storage="local",
-                duration_seconds=duration,
-                recording_key=recording_key,
-            )
-        except Exception as exc:
-            print("🎙️ Call record key-only complete failed:", repr(exc))
-            result = {"success": False, "error": repr(exc)}
-        phone_call = result.get("phone_call") or {}
-        saved_ok = bool(result.get("success")) and phone_call.get("recording_status") == "saved"
-
     if status == "saved" and not saved_ok:
         error = result.get("error") or phone_call.get("recording_status") or "upload failed"
-        print("🎙️ Recording could not be registered, marking failed:", error)
+        print("🎙️ Rails recording upload failed, marking failed:", error)
         try:
             result = await client.complete_phone_call(
                 client_id=client_id,
